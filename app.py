@@ -26,6 +26,9 @@ def enhance_image_for_ocr(image):
 
 def extract_ocr_from_pdf(pdf_bytes):
     """แปลง PDF เป็น OCR Text และคืนค่าทั้ง text และ images"""
+    # กำหนด Tesseract Path สำหรับ Linux/Cloud Server
+    pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+    
     temp_file = "temp_upload.pdf"
     try:
         # บันทึกไฟล์ชั่วคราว
@@ -35,22 +38,22 @@ def extract_ocr_from_pdf(pdf_bytes):
         st.info("🔄 กำลังแปลง PDF เป็นรูปภาพ...")
         
         # แปลง PDF เป็นรูปภาพ
+        # Note: บน Cloud ไม่ต้องระบุ poppler_path
         pages = convert_from_path(temp_file, dpi=400)
         
         ocr_results = []
-        processed_images = []
         
         for i, page in enumerate(pages):
             st.info(f"📖 กำลังทำ OCR หน้าที่ {i+1}/{len(pages)}...")
             
             # ปรับปรุงคุณภาพรูปภาพ
             enhanced_page = enhance_image_for_ocr(page)
-            processed_images.append(enhanced_page)
             
             # ทำ OCR
             ocr_text = pytesseract.image_to_string(
                 enhanced_page,
                 lang="tha+eng",
+                # ใช้ config ที่เหมาะสมสำหรับเอกสารที่เป็นตาราง/ฟอร์ม (PSM 6)
                 config='--psm 6 --oem 3'
             )
             
@@ -84,6 +87,7 @@ def extract_data_from_ocr_text(text):
     date_pattern = r'(\d{1,2}/\d{1,2}/\d{2,4})'
     date_matches = re.findall(date_pattern, text)
     if date_matches:
+        # เลือกวันที่แรกที่พบ
         data['date'] = date_matches[0]
         data['raw_matches']['dates_found'] = date_matches
     
@@ -91,36 +95,27 @@ def extract_data_from_ocr_text(text):
     invoice_pattern = r'(HH\d{6,8})'
     invoice_matches = re.findall(invoice_pattern, text)
     if invoice_matches:
+        # เลือกเลขที่บิลแรกที่พบ
         data['invoice_number'] = invoice_matches[0]
         data['raw_matches']['invoices_found'] = invoice_matches
     
-    # Pattern สำหรับมูลค่าสินค้า - หลายรูปแบบ
-    amount_patterns = [
-        r'มูลค่าสินค้า\s*:?\s*([,\d]+\.?\d{0,2})',  # มูลค่าสินค้า: 4710.28
-        r'Product\s*Value\s*:?\s*([,\d]+\.?\d{0,2})',  # Product Value: 4710.28
-        r'(\d{1,3}(?:,\d{3})*\.\d{2})',  # รูปแบบตัวเลข 4,710.28 หรือ 4710.28
-    ]
+    # Pattern สำหรับมูลค่าสินค้า (ยอดก่อน VAT)
+    # Regex ขั้นสุดท้าย: ครอบคลุมคำว่า 'มูลค่าสินค้า' หรือ 'Product Value' 
+    # และจับกลุ่มตัวเลขที่อยู่บรรทัดเดียวกันหรือบรรทัดถัดไป
+    amount_pattern = r"(?:มูลค่าสินค้า|Product Value)\s*[\n\r]*\s*([,\d]+\.\d{2})"
     
-    all_amounts = []
-    for pattern in amount_patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        all_amounts.extend(matches)
+    amount_match = re.search(amount_pattern, text, re.IGNORECASE)
     
-    if all_amounts:
-        # เลือกตัวเลขที่มีทศนิยม 2 หลักและมีขนาดเหมาะสม
-        valid_amounts = []
-        for amount in all_amounts:
-            clean_amount = amount.replace(',', '')
-            try:
-                float_amount = float(clean_amount)
-                if 100 <= float_amount <= 1000000:  # ช่วงที่เหมาะสม
-                    valid_amounts.append(amount)
-            except ValueError:
-                continue
-        
-        if valid_amounts:
-            data['amount'] = valid_amounts[0]
-        data['raw_matches']['amounts_found'] = all_amounts
+    if amount_match:
+        # group(1) คือตัวเลขที่ถูกจับกลุ่ม
+        raw_amount = amount_match.group(1).replace(',', '')
+        try:
+            # แปลงเป็น float เพื่อให้แน่ใจว่าเป็นตัวเลข
+            data['amount'] = f"{float(raw_amount):.2f}"
+        except ValueError:
+            data['amount'] = raw_amount
+            
+    data['raw_matches']['amounts_found'] = [data['amount']]
     
     return data
 
@@ -143,37 +138,36 @@ def create_excel_template():
 
 def fill_excel_with_data(data_list):
     """กรอกข้อมูลลง Excel"""
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Invoice_Data"
+    # สร้าง DataFrame จาก List of Dictionaries
+    df_data = pd.DataFrame(data_list)
     
-    # Header
-    headers = ['ลำดับ', 'วันที่', 'เลขที่ตามบิล', 'ยอดก่อน VAT']
-    for col, header in enumerate(headers, 1):
-        ws.cell(row=1, column=col, value=header)
+    # จัดเรียงตามเลขหน้า
+    df_data = df_data.sort_values(by='page_number').reset_index(drop=True)
     
-    # กรอกข้อมูล
-    for row_idx, data in enumerate(data_list, start=2):
-        ws.cell(row=row_idx, column=1, value=row_idx-1)  # ลำดับ
-        ws.cell(row=row_idx, column=2, value=data['date'])  # วันที่
-        ws.cell(row=row_idx, column=3, value=data['invoice_number'])  # เลขที่ตามบิล
-        ws.cell(row=row_idx, column=4, value=data['amount'])  # ยอดก่อน VAT
-    
-    # บันทึกลงหน่วยความจำ
+    # แปลงเป็น Excel
     output = io.BytesIO()
-    wb.save(output)
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # เลือกเฉพาะคอลัมน์ที่ต้องการ (วันที่, เลขที่ตามบิล, ยอดก่อน VAT)
+        df_to_excel = df_data[['date', 'invoice_number', 'amount']].copy()
+        df_to_excel.insert(0, 'ลำดับ', df_to_excel.index + 1)
+        
+        # เปลี่ยนชื่อคอลัมน์ให้ตรงกับที่ต้องการ
+        df_to_excel.columns = ['ลำดับ', 'วันที่', 'เลขที่ตามบิล', 'ยอดก่อน VAT']
+        
+        df_to_excel.to_excel(writer, index=False, sheet_name='Invoice_Data')
+    
     output.seek(0)
     return output
 
 def main():
     st.set_page_config(
-        page_title="PDF OCR Checker & Excel Filler", 
+        page_title="PDF OCR Extractor",
         layout="wide",
         initial_sidebar_state="expanded"
     )
     
     st.title("🔍 PDF OCR Checker & Excel Data Filler")
-    st.markdown("**ตรวจสอบ OCR ก่อนกรอกข้อมูลลง Excel**")
+    st.markdown("**(สำหรับใบเสร็จ บริษัท ธนารัตน์ปิยะปิโตรเลียม จำกัด)**")
     st.markdown("---")
     
     # Initialize session state
@@ -184,109 +178,98 @@ def main():
     
     # Sidebar
     with st.sidebar:
-        st.header("⚙️ ขั้นตอนการทำงาน")
+        st.header("⚙️ สรุปขั้นตอน")
         st.markdown("""
         1. 📁 **อัปโหลด PDF**
-        2. 👁️ **ตรวจสอบ OCR**
-        3. ✏️ **แก้ไขข้อมูล (ถ้าจำเป็น)**
+        2. 🚀 **กด 'เริ่ม OCR'**
+        3. ✏️ **ตรวจสอบ/แก้ไข (สำคัญ!)**
         4. 💾 **ดาวน์โหลด Excel**
         """)
         
         st.markdown("---")
-        st.markdown("### 🎯 รูปแบบข้อมูลที่ต้องการ:")
+        st.markdown("### 🎯 ข้อมูลที่ต้องการ:")
         st.markdown("""
-        - **วันที่:** 01/08/68
-        - **เลขที่:** HH6800470  
-        - **มูลค่า:** 4710.28
+        - **วันที่** (กรอกในช่อง 'วันที่')
+        - **เลขที่ตามบิล** (กรอกในช่อง 'เลขที่ตามบิล')
+        - **มูลค่าสินค้า** (กรอกในช่อง 'ยอดก่อน VAT')
         """)
     
-    # Step 1: Upload PDF
-    st.header("📁 Step 1: อัปโหลดไฟล์ PDF")
+    # --- Step 1 & 2: Upload and Convert ---
+    st.header("1. 📁 อัปโหลดไฟล์ PDF")
     uploaded_file = st.file_uploader(
-        "เลือกไฟล์ PDF", 
+        "เลือกไฟล์ PDF",
         type="pdf",
-        help="อัปโหลดไฟล์ PDF ที่ต้องการแปลงเป็น OCR"
+        help="อัปโหลดไฟล์ใบเสร็จ PDF ที่รวมหลายหน้าได้"
     )
     
     if uploaded_file is not None:
         st.success(f"✅ อัปโหลดไฟล์: {uploaded_file.name}")
         
-        # Step 2: Convert to OCR
-        st.header("🔄 Step 2: แปลง PDF เป็น OCR")
-        
         col1, col2 = st.columns([1, 4])
         with col1:
             if st.button("🚀 เริ่มแปลง OCR", type="primary"):
-                with st.spinner("กำลังประมวลผล..."):
+                with st.spinner("⏳ กำลังประมวลผล PDF และทำ OCR..."):
                     pdf_bytes = uploaded_file.getvalue()
                     st.session_state.ocr_results = extract_ocr_from_pdf(pdf_bytes)
-                
-                if st.session_state.ocr_results:
-                    st.success(f"✅ แปลง OCR เสร็จสิ้น! จำนวนหน้า: {len(st.session_state.ocr_results)}")
         
-        # Step 3: Display OCR Results
         if st.session_state.ocr_results:
-            st.header("👁️ Step 3: ตรวจสอบผลลัพธ์ OCR")
+            st.success(f"✅ แปลง OCR เสร็จสิ้น! พบ {len(st.session_state.ocr_results)} หน้า")
             
-            # แสดงผลลัพธ์แต่ละหน้า
+            # --- Step 3: Display and Edit Results ---
+            st.header("2. 👁️ ตรวจสอบและแก้ไขข้อมูล (จำเป็น)")
+            st.warning("⚠️ โปรดตรวจสอบข้อมูลที่ดึงมาโดย OCR ในช่องสีเหลือง แล้วกด 'บันทึก' ทุกหน้า")
+            
+            # Loop เพื่อแสดงผลลัพธ์แต่ละหน้า
             for result in st.session_state.ocr_results:
-                with st.expander(f"📄 หน้าที่ {result['page_number']}", expanded=True):
+                page_key = result['page_number']
+                
+                # ดึงข้อมูลจาก OCR (ทุกครั้งที่หน้าถูกสร้าง)
+                extracted = extract_data_from_ocr_text(result['ocr_text'])
+                
+                # ค้นหาค่าที่บันทึกไว้แล้ว (ถ้ามี)
+                saved_data = next((d for d in st.session_state.extracted_data if d['page_number'] == page_key), None)
+                
+                with st.expander(f"📄 ใบเสร็จหน้าที่ {page_key}", expanded=False):
+                    
+                    st.markdown(f"**สถานะ:** {'💾 บันทึกแล้ว' if saved_data else '✏️ รอการบันทึก/แก้ไข'}")
                     
                     col1, col2 = st.columns([1, 1])
                     
                     with col1:
-                        st.subheader("🖼️ รูปภาพที่ปรับปรุงแล้ว:")
-                        st.image(result['image'], use_container_width=True)
-                    
-                    with col2:
-                        st.subheader("📝 ข้อความที่ได้จาก OCR:")
-                        st.text_area(
-                            "OCR Text:", 
-                            result['ocr_text'], 
-                            height=300,
-                            key=f"ocr_text_{result['page_number']}"
-                        )
+                        st.subheader("📝 ข้อมูลที่ดึงได้:")
                         
-                        # ดึงข้อมูลจาก OCR
-                        extracted = extract_data_from_ocr_text(result['ocr_text'])
+                        # ใช้ค่าที่บันทึกไว้ (ถ้ามี) หรือใช้ค่าจาก OCR ใหม่
+                        initial_date = saved_data['date'] if saved_data else extracted['date']
+                        initial_invoice = saved_data['invoice_number'] if saved_data else extracted['invoice_number']
+                        initial_amount = saved_data['amount'] if saved_data else extracted['amount']
                         
-                        st.subheader("🎯 ข้อมูลที่ดึงได้:")
-                        
-                        # แสดงข้อมูลที่ดึงได้
+                        # --- Input Fields for User Correction ---
                         date_value = st.text_input(
-                            "📅 วันที่:", 
-                            value=extracted['date'],
-                            key=f"date_{result['page_number']}"
+                            "📅 วันที่:",
+                            value=initial_date,
+                            key=f"date_{page_key}"
                         )
                         
                         invoice_value = st.text_input(
-                            "🔢 เลขที่ตามบิล:", 
-                            value=extracted['invoice_number'],
-                            key=f"invoice_{result['page_number']}"
+                            "🔢 เลขที่ตามบิล:",
+                            value=initial_invoice,
+                            key=f"invoice_{page_key}"
                         )
                         
                         amount_value = st.text_input(
-                            "💰 ยอดก่อน VAT:", 
-                            value=extracted['amount'],
-                            key=f"amount_{result['page_number']}"
+                            "💰 ยอดก่อน VAT:",
+                            value=initial_amount,
+                            key=f"amount_{page_key}"
                         )
                         
-                        # แสดงข้อมูลที่พบทั้งหมด (สำหรับ Debug)
-                        if extracted['raw_matches']:
-                            with st.expander("🔍 ข้อมูลทั้งหมดที่พบ (Debug)"):
-                                st.json(extracted['raw_matches'])
-                        
-                        # บันทึกข้อมูลที่แก้ไขแล้ว
-                        if st.button(f"💾 บันทึกข้อมูลหน้า {result['page_number']}", key=f"save_{result['page_number']}"):
+                        # ปุ่มบันทึกข้อมูล
+                        if st.button(f"💾 บันทึก/อัปเดตข้อมูลหน้า {page_key}", key=f"save_{page_key}", type="primary", use_container_width=True):
+                            
                             # ตรวจสอบว่ามีข้อมูลหน้านี้อยู่แล้วหรือไม่
-                            existing_index = None
-                            for i, data in enumerate(st.session_state.extracted_data):
-                                if data['page_number'] == result['page_number']:
-                                    existing_index = i
-                                    break
+                            existing_index = next((i for i, data in enumerate(st.session_state.extracted_data) if data['page_number'] == page_key), None)
                             
                             page_data = {
-                                'page_number': result['page_number'],
+                                'page_number': page_key,
                                 'date': date_value,
                                 'invoice_number': invoice_value,
                                 'amount': amount_value
@@ -297,45 +280,46 @@ def main():
                             else:
                                 st.session_state.extracted_data.append(page_data)
                             
-                            st.success(f"✅ บันทึกข้อมูลหน้า {result['page_number']} เรียบร้อย!")
+                            # บังคับให้ Streamlit รันซ้ำเพื่ออัปเดตสถานะ
+                            st.rerun() 
+                    
+                    with col2:
+                        st.subheader("🖼️ รูปภาพ OCR & Text (ต้นฉบับ):")
+                        st.image(result['image'], use_container_width=True)
+                        
+                        with st.expander("📝 ข้อความ OCR ดิบ (Raw Text)"):
+                             st.text_area(
+                                "OCR Text:",
+                                result['ocr_text'],
+                                height=250,
+                                key=f"ocr_text_{page_key}"
+                            )
             
-            # Step 4: Create Excel
+            # --- Step 4: Create Excel ---
             if st.session_state.extracted_data:
-                st.header("💾 Step 4: สร้างไฟล์ Excel")
+                st.header("3. 💾 ดาวน์โหลดไฟล์ Excel")
                 
                 # แสดงสรุปข้อมูลที่จะกรอกลง Excel
-                st.subheader("📋 สรุปข้อมูลที่จะกรอกลง Excel:")
+                df_summary = pd.DataFrame(st.session_state.extracted_data)
+                df_summary = df_summary.sort_values(by='page_number').reset_index(drop=True)
                 
-                summary_data = []
-                for data in st.session_state.extracted_data:
-                    summary_data.append({
-                        'หน้า': data['page_number'],
-                        'วันที่': data['date'],
-                        'เลขที่ตามบิล': data['invoice_number'],
-                        'ยอดก่อน VAT': data['amount']
-                    })
+                st.subheader("📋 สรุปข้อมูลที่ถูกบันทึกแล้ว:")
+                st.dataframe(df_summary, use_container_width=True, height=300)
                 
-                df_summary = pd.DataFrame(summary_data)
-                st.dataframe(df_summary, use_container_width=True)
+                st.info(f"📊 พร้อมสร้างไฟล์ Excel ด้วยข้อมูล {len(st.session_state.extracted_data)} รายการ")
                 
                 # ปุ่มดาวน์โหลด Excel
-                col1, col2 = st.columns([3, 1])
+                excel_file = fill_excel_with_data(st.session_state.extracted_data)
                 
-                with col2:
-                    excel_file = fill_excel_with_data(st.session_state.extracted_data)
-                    
-                    st.download_button(
-                        label="⬇️ ดาวน์โหลด Excel",
-                        data=excel_file,
-                        file_name=f"Invoice_Data_{uploaded_file.name.replace('.pdf', '')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        type="primary",
-                        use_container_width=True
-                    )
-                
-                with col1:
-                    st.info(f"📊 พร้อมสร้างไฟล์ Excel ด้วยข้อมูล {len(st.session_state.extracted_data)} รายการ")
-    
+                st.download_button(
+                    label="⬇️ ดาวน์โหลด Excel (Final File)",
+                    data=excel_file,
+                    file_name=f"Invoice_Data_{uploaded_file.name.replace('.pdf', '')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True
+                )
+        
     else:
         st.info("👆 กรุณาอัปโหลดไฟล์ PDF เพื่อเริ่มต้น")
         
