@@ -17,9 +17,21 @@ pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 # ================================
 # Helper Functions
 # ================================
+def crop_table_area(pil_img):
+    """
+    Crop ส่วนของตารางที่มีวันที่, เลขบิล, ยอดก่อน VAT
+    ปรับค่า crop_box ตาม layout เอกสารจริง
+    """
+    width, height = pil_img.size
+    left = int(width * 0.05)
+    upper = int(height * 0.2)
+    right = int(width * 0.95)
+    lower = int(height * 0.9)
+    return pil_img.crop((left, upper, right, lower))
+
 def preprocess_image_for_ocr(pil_img):
-    """ปรับปรุงคุณภาพภาพด้วย OpenCV และ PIL"""
-    # เพิ่ม contrast/sharpness/brightness
+    """ปรับปรุงคุณภาพภาพด้วย PIL + OpenCV"""
+    # PIL Enhance
     enhancer = ImageEnhance.Contrast(pil_img)
     pil_img = enhancer.enhance(2.0)
     enhancer = ImageEnhance.Sharpness(pil_img)
@@ -31,7 +43,7 @@ def preprocess_image_for_ocr(pil_img):
     img = np.array(pil_img.convert("RGB"))
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-    # Adaptive threshold
+    # Adaptive Threshold
     thresh = cv2.adaptiveThreshold(
         gray, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -97,8 +109,8 @@ def fill_excel_with_data(data_list):
 # ================================
 # Streamlit App
 # ================================
-st.title("📄 OCR Extractor for Invoice PDF")
-st.write("อัปโหลด PDF → OCR → ดึงวันที่, เลขที่บิล, ยอดก่อน VAT → ดาวน์โหลด Excel")
+st.title("📄 OCR Extractor for Invoice PDF with Table Crop")
+st.write("อัปโหลด PDF → OCR (crop ตาราง) → ตรวจสอบ/แก้ไข → ดาวน์โหลด Excel")
 
 uploaded_file = st.file_uploader("อัปโหลด PDF", type="pdf")
 
@@ -110,33 +122,39 @@ if uploaded_file:
         results = []
 
         for i, page in enumerate(pages):
-            # Preprocess image
-            proc = preprocess_image_for_ocr(page)
+            # Crop table
+            cropped_page = crop_table_area(page)
 
-            # OCR หลายครั้ง (psm 6 และ 11)
+            # Preprocess
+            proc = preprocess_image_for_ocr(cropped_page)
+
+            # OCR หลายครั้ง (psm 6 + 11)
             text1 = pytesseract.image_to_string(proc, lang="tha+eng", config="--psm 6 --oem 3")
             text2 = pytesseract.image_to_string(proc, lang="tha+eng", config="--psm 11 --oem 3")
             text = text1 + "\n" + text2
 
             data = extract_fields(text)
             data["page_number"] = i + 1
+            data["image"] = page  # เก็บภาพต้นฉบับ
             results.append(data)
 
-    # แสดงผล OCR ที่ดึงได้
-    st.subheader("🔍 ข้อมูลที่ OCR เจอ (ตรวจสอบก่อนโหลด)")
-    df_results = pd.DataFrame(results)[["page_number", "date", "invoice_number", "amount"]]
-    st.dataframe(df_results)
+    st.subheader("🔍 ตรวจสอบและแก้ไขข้อมูลแต่ละหน้า")
 
-    # ให้ผู้ใช้แก้ไขค่าที่ OCR เพี้ยน
     edited_results = []
-    for idx, row in df_results.iterrows():
-        st.markdown(f"**หน้า {row['page_number']}**")
-        date_val = st.text_input("📅 วันที่", value=row['date'], key=f"date_{idx}")
-        inv_val = st.text_input("🔢 เลขที่ตามบิล", value=row['invoice_number'], key=f"inv_{idx}")
-        amt_val = st.text_input("💰 ยอดก่อน VAT", value=row['amount'], key=f"amt_{idx}")
+    for res in results:
+        st.markdown(f"### 📄 หน้า {res['page_number']}")
+        st.image(res["image"], use_column_width=True)
+        
+        date_val = st.text_input("📅 วันที่", value=res['date'], key=f"date_{res['page_number']}")
+        inv_val = st.text_input("🔢 เลขที่ตามบิล", value=res['invoice_number'], key=f"inv_{res['page_number']}")
+        amt_val = st.text_input("💰 ยอดก่อน VAT", value=res['amount'], key=f"amt_{res['page_number']}")
+        
         edited_results.append({"date": date_val, "invoice_number": inv_val, "amount": amt_val})
 
-    # ปุ่มดาวน์โหลด Excel
+    st.subheader("📋 สรุปข้อมูลทั้งหมดก่อนดาวน์โหลด")
+    df_summary = pd.DataFrame(edited_results)
+    st.dataframe(df_summary)
+
     excel_file = fill_excel_with_data(edited_results)
     st.download_button(
         "⬇️ ดาวน์โหลด Excel",
