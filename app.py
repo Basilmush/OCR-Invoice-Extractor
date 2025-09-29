@@ -7,7 +7,7 @@ import cv2
 from pdf2image import convert_from_bytes
 from openpyxl import Workbook
 import io
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 # ================================
 # ตั้งค่า Tesseract
@@ -18,25 +18,35 @@ pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 # Helper Functions
 # ================================
 def preprocess_image_for_ocr(pil_img):
-    """ปรับคุณภาพภาพด้วย OpenCV"""
+    """ปรับปรุงคุณภาพภาพด้วย OpenCV และ PIL"""
+    # เพิ่ม contrast/sharpness/brightness
+    enhancer = ImageEnhance.Contrast(pil_img)
+    pil_img = enhancer.enhance(2.0)
+    enhancer = ImageEnhance.Sharpness(pil_img)
+    pil_img = enhancer.enhance(1.5)
+    enhancer = ImageEnhance.Brightness(pil_img)
+    pil_img = enhancer.enhance(1.1)
+
+    # Convert to OpenCV
     img = np.array(pil_img.convert("RGB"))
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-    # Adaptive threshold ให้เส้นคม
+    # Adaptive threshold
     thresh = cv2.adaptiveThreshold(
         gray, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY, 35, 15
     )
-    # ลด noise
+
+    # Denoise
     denoised = cv2.medianBlur(thresh, 3)
     return denoised
 
 def clean_amount(val):
-    """เช็คความสมเหตุสมผลของยอด OCR"""
+    """ตรวจสอบความสมเหตุสมผลของยอด OCR"""
     try:
         num = float(val.replace(",", ""))
-        if num <= 0 or num > 100000:  # กำหนด threshold
+        if num <= 0 or num > 50000:  # threshold
             return ""
         return f"{num:.2f}"
     except:
@@ -47,10 +57,7 @@ def extract_fields(text):
     data = {"date": "", "invoice_number": "", "amount": ""}
 
     # วันที่
-    date_patterns = [
-        r"(\d{1,2}/\d{1,2}/\d{2,4})",
-        r"(\d{1,2}-\d{1,2}-\d{2,4})"
-    ]
+    date_patterns = [r"(\d{1,2}/\d{1,2}/\d{2,4})", r"(\d{1,2}-\d{1,2}-\d{2,4})"]
     for p in date_patterns:
         m = re.search(p, text)
         if m:
@@ -58,10 +65,7 @@ def extract_fields(text):
             break
 
     # เลขที่บิล
-    inv_patterns = [
-        r"(HH\d{6,8})",
-        r"(?:เลขที่|No\.?)\s*([A-Z0-9]{6,12})"
-    ]
+    inv_patterns = [r"(HH\d{6,8})", r"(?:เลขที่|No\.?)\s*([A-Z0-9]{6,12})"]
     for p in inv_patterns:
         m = re.search(p, text)
         if m:
@@ -69,10 +73,7 @@ def extract_fields(text):
             break
 
     # ยอดก่อน VAT
-    amt_patterns = [
-        r"([0-9,]+\.\d{2})\s*(?=บาท|THB|ก่อน VAT)",
-        r"(?:มูลค่าสินค้า|Subtotal|ก่อนภาษี).*?([0-9,]+\.\d{2})"
-    ]
+    amt_patterns = [r"([0-9,]+\.\d{2})\s*(?=บาท|THB|ก่อน VAT)", r"(?:มูลค่าสินค้า|Subtotal|ก่อนภาษี).*?([0-9,]+\.\d{2})"]
     for p in amt_patterns:
         m = re.search(p, text, re.DOTALL | re.IGNORECASE)
         if m:
@@ -109,8 +110,14 @@ if uploaded_file:
         results = []
 
         for i, page in enumerate(pages):
+            # Preprocess image
             proc = preprocess_image_for_ocr(page)
-            text = pytesseract.image_to_string(proc, lang="tha+eng", config="--psm 6 --oem 3")
+
+            # OCR หลายครั้ง (psm 6 และ 11)
+            text1 = pytesseract.image_to_string(proc, lang="tha+eng", config="--psm 6 --oem 3")
+            text2 = pytesseract.image_to_string(proc, lang="tha+eng", config="--psm 11 --oem 3")
+            text = text1 + "\n" + text2
+
             data = extract_fields(text)
             data["page_number"] = i + 1
             results.append(data)
@@ -120,8 +127,17 @@ if uploaded_file:
     df_results = pd.DataFrame(results)[["page_number", "date", "invoice_number", "amount"]]
     st.dataframe(df_results)
 
+    # ให้ผู้ใช้แก้ไขค่าที่ OCR เพี้ยน
+    edited_results = []
+    for idx, row in df_results.iterrows():
+        st.markdown(f"**หน้า {row['page_number']}**")
+        date_val = st.text_input("📅 วันที่", value=row['date'], key=f"date_{idx}")
+        inv_val = st.text_input("🔢 เลขที่ตามบิล", value=row['invoice_number'], key=f"inv_{idx}")
+        amt_val = st.text_input("💰 ยอดก่อน VAT", value=row['amount'], key=f"amt_{idx}")
+        edited_results.append({"date": date_val, "invoice_number": inv_val, "amount": amt_val})
+
     # ปุ่มดาวน์โหลด Excel
-    excel_file = fill_excel_with_data(df_results[["date","invoice_number","amount"]].to_dict(orient="records"))
+    excel_file = fill_excel_with_data(edited_results)
     st.download_button(
         "⬇️ ดาวน์โหลด Excel",
         data=excel_file,
