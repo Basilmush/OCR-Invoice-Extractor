@@ -1,6 +1,8 @@
 streamlit
 pandas
-openpyxl
+numpy
 pytesseract
 pdf2image
 Pillow
+opencv-python-headless
+openpyxl
