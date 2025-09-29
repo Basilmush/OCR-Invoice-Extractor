@@ -32,25 +32,49 @@ def optimize_image_for_ocr(image):
         
         # 4. เพิ่มความคมชัดมาก
         enhancer = ImageEnhance.Sharpness(image)
-        image = enhancer.enhance(3.5)  # เพิ่มจาก 3.0 เพื่อความคมชัดมากขึ้น
+        image = enhancer.enhance(4.0)  # เพิ่มจาก 3.5 เพื่อความคมชัดสูงขึ้น
         
         # 5. เพิ่ม contrast สูง
         enhancer = ImageEnhance.Contrast(image)
-        image = enhancer.enhance(3.0)  # เพิ่มจาก 2.8
+        image = enhancer.enhance(3.5)  # เพิ่มจาก 3.0
         
         # 6. Apply sharpen filter
-        image = image.filter(ImageFilter.SHARPEN)
+        image = image.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))  # ใช้ UnsharpMask แทน SHARPEN
         
         # 7. ปรับ brightness เล็กน้อย
         enhancer = ImageEnhance.Brightness(image)
-        image = enhancer.enhance(1.2)  # เพิ่มจาก 1.15
+        image = enhancer.enhance(1.3)  # เพิ่มจาก 1.2
         
         # 8. Add binary threshold เพื่อลด noise
-        image = image.point(lambda x: 0 if x < 140 else 255)
+        image = image.point(lambda x: 0 if x < 130 else 255)  # ปรับ threshold ลงเพื่อให้ขาว-ดำชัดเจนขึ้น
         
         return image
     except Exception as e:
         st.warning(f"Image optimization warning: {e}")
+        return image
+
+def optimize_image_for_display(image):
+    """ปรับปรุงรูปภาพให้ชัดเจนสำหรับการแสดงผล"""
+    try:
+        # 1. ปรับขนาดภาพให้เหมาะสมกับการแสดงผล (ลดขนาดลงเล็กน้อยเพื่อโหลดเร็ว)
+        max_width = 800
+        ratio = max_width / image.width
+        new_height = int(image.height * ratio)
+        image = image.resize((max_width, new_height), Image.LANCZOS)
+        
+        # 2. เพิ่มความคมชัด
+        enhancer = ImageEnhance.Sharpness(image)
+        image = enhancer.enhance(2.0)
+        
+        # 3. ปรับ contrast และ brightness
+        enhancer = ImageEnhance.Contrast(image)
+        image = enhancer.enhance(1.5)
+        enhancer = ImageEnhance.Brightness(image)
+        image = enhancer.enhance(1.2)
+        
+        return image
+    except Exception as e:
+        st.warning(f"Image display optimization warning: {e}")
         return image
 
 def extract_invoice_data_precise(ocr_text):
@@ -295,7 +319,7 @@ def process_pdf_ultra_fast(pdf_bytes):
             # ดึงข้อมูล
             extracted_data = extract_invoice_data_precise(combined_text)
             extracted_data['page_number'] = i + 1
-            extracted_data['raw_text'] = combined_text[:500]  # เก็บ text บางส่วนไว้ debug
+            extracted_data['raw_text'] = combined_text  # เก็บ text ทั้งหมดเพื่อตรวจสอบ
             
             results.append(extracted_data)
         
@@ -306,13 +330,13 @@ def process_pdf_ultra_fast(pdf_bytes):
         progress_bar.empty()
         status_text.empty()
         
-        return results
+        return results, pages
         
     except Exception as e:
         if os.path.exists(temp_file):
             os.remove(temp_file)
         st.error(f"❌ เกิดข้อผิดพลาด: {str(e)}")
-        return []
+        return [], []
 
 def create_final_excel(data_list, filename):
     """สร้างไฟล์ Excel สำเร็จรูป"""
@@ -376,7 +400,7 @@ def main():
     with st.container():
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            st.info("📋 **วิธีใช้:** อัปโหลด PDF → กด 'ประมวลผล' → ดาวน์โหลด Excel ✅")
+            st.info("📋 **วิธีใช้:** อัปโหลด PDF → กด 'ประมวลผล' → ตรวจสอบข้อมูลและภาพ → ดาวน์โหลด Excel ✅")
     
     # Main area
     st.header("📁 อัปโหลดไฟล์ PDF")
@@ -412,7 +436,7 @@ def main():
                     
                     # ประมวลผล PDF
                     pdf_bytes = uploaded_file.getvalue()
-                    results = process_pdf_ultra_fast(pdf_bytes)
+                    results, page_images = process_pdf_ultra_fast(pdf_bytes)
                 
                 if results:
                     st.success(f"✅ ประมวลผลเสร็จสิ้น! พบข้อมูล {len(results)} หน้า")
@@ -482,30 +506,24 @@ def main():
                     with col1:
                         st.info("📋 ไฟล์ Excel มี 2 Sheet: 'Invoice_Data' (ข้อมูลหลัก) และ 'Summary' (สรุป)")
                     
-                    # Debug section - แสดงเสมอเพื่อตรวจสอบ
-                    st.subheader("🔍 การตรวจสอบข้อมูลที่ดึงได้")
+                    # ระบบตรวจสอบข้อมูลพร้อมภาพเอกสาร
+                    st.subheader("🔍 การตรวจสอบข้อมูลที่ดึงได้พร้อมภาพเอกสาร")
                     
-                    debug_data = []
-                    for i, result in enumerate(results, 1):
-                        debug_info = {
-                            'หน้า': i,
-                            'วันที่ที่พบ': result.get('debug_matches', {}).get('date_line', ''),
-                            'เลขที่ที่พบ': result.get('debug_matches', {}).get('invoice_line', ''),
-                            'ยอดเงินที่พบ': result.get('debug_matches', {}).get('amount_line', ''),
-                            'ผลลัพธ์สุดท้าย': f"{result['date']} | {result['invoice_number']} | {result['amount']}"
-                        }
-                        debug_data.append(debug_info)
+                    for idx, result in enumerate(results):
+                        with st.expander(f"หน้า {idx+1} - ผลลัพธ์: {result['date']} | {result['invoice_number']} | {result['amount']} | ความแม่นยำ {result['confidence']}%"):
+                            # แสดงภาพเอกสารที่ปรับปรุงแล้ว
+                            optimized_display_image = optimize_image_for_display(page_images[idx])
+                            st.image(optimized_display_image, caption=f"ภาพเอกสารหน้า {idx+1} (ปรับปรุงความชัด)", use_column_width=True)
+                            
+                            # แสดง Raw OCR Text
+                            st.text_area(f"Raw OCR Text หน้า {idx+1}:", result.get('raw_text', ''), height=300)
+                            
+                            # แสดง debug matches ถ้ามี
+                            if 'debug_matches' in result:
+                                st.write("Debug Matches:")
+                                st.json(result['debug_matches'])
                     
-                    debug_df = pd.DataFrame(debug_data)
-                    st.dataframe(debug_df, use_container_width=True, height=400)
-                    
-                    # แสดง Raw OCR Text สำหรับหน้าทั้งหมด
-                    st.subheader("📝 OCR Text ทุกหน้า")
-                    for i, result in enumerate(results):
-                        with st.expander(f"หน้า {i+1} - Raw OCR Text"):
-                            st.text_area(f"OCR Text หน้า {i+1}:", result.get('raw_text', ''), height=200, key=f"raw_text_{i}")
-                    
-                    st.warning("⚠️ กรุณาตรวจสอบข้อมูล OCR ข้างต้นก่อนดาวน์โหลด Excel หากไม่ถูกต้องให้แจ้งเพื่อปรับปรุง pattern")
+                    st.warning("⚠️ กรุณาตรวจสอบข้อมูลและภาพเอกสารข้างต้น หากไม่ถูกต้องให้แจ้งเพื่อปรับปรุง pattern")
                 
                 else:
                     st.error("❌ ไม่สามารถประมวลผลได้ กรุณาลองใหม่อีกครั้ง")
@@ -520,18 +538,18 @@ def main():
                 'ลำดับ': [1, 2, 3, 4, 5],
                 'วันที่': ['01/08/68', '02/08/68', '03/08/68', '04/08/68', '05/08/68'],
                 'เลขที่ตามบิล': ['HH6800470', 'HH6800474', 'HH6800475', 'HH6800476', 'HH6800478'],
-                'ยอดก่อน VAT': ['5040.00', '17708.00', '17708.00', '18654.00', '13814.00']
+                'ยอดก่อน VAT': ['4710.28', '16549.53', '17433.64', '12910.28', '21648.60']
             }
             
             sample_df = pd.DataFrame(sample_data)
-            st.dataframe(sample_df, use_container_width=True)
+            st.dataframe(sample_df, use_column_width=True)
             
             st.markdown("**คุณสมบัติเด่น:**")
             st.markdown("""
             - ⚡ **ความเร็วสูง** - ประมวลผลอัตโนมัติ 100%
             - 🎯 **ความแม่นยำสูง** - AI OCR เฉพาะงานใบเสร็จไทย  
             - 💡 **ใช้งานง่าย** - กดปุ่มเดียวได้ Excel เลย
-            - 📊 **ครบครัน** - สรุปสถิติและตรวจสอบข้อมูล
+            - 📊 **ครบครัน** - สรุปสถิติและตรวจสอบข้อมูลพร้อมภาพเอกสารชัดเจน
             """)
 
 if __name__ == "__main__":
