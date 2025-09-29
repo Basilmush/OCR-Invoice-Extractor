@@ -1,17 +1,15 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import re
 import pytesseract
 import cv2
 from pdf2image import convert_from_bytes
-from openpyxl import Workbook
-import io
 from PIL import Image, ImageEnhance
+import io
+import re
 
 
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
-
 
 def preprocess_image_for_ocr(pil_img):
     enhancer = ImageEnhance.Contrast(pil_img)
@@ -23,11 +21,9 @@ def preprocess_image_for_ocr(pil_img):
 
     img = np.array(pil_img.convert("RGB"))
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    thresh = cv2.adaptiveThreshold(
-        gray, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 41, 15
-    )
+    thresh = cv2.adaptiveThreshold(gray, 255,
+                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY, 41, 15)
     denoised = cv2.medianBlur(thresh, 3)
     return denoised
 
@@ -82,45 +78,49 @@ def fill_excel_with_data(data_list):
     return output
 
 
-st.title("📄 OCR Extractor (PDF & Image)")
-st.write("อัปโหลด PDF / รูปภาพ → OCR → แก้ไขภาพและตาราง → ดาวน์โหลด Excel")
+st.title("📄 OCR & Editable Invoice Viewer")
+st.write("อัปโหลด PDF / รูปภาพ → OCR → แก้ไขใต้ภาพ → ดาวน์โหลด Excel")
 
 uploaded_file = st.file_uploader("อัปโหลด PDF หรือ รูปภาพ", type=["pdf", "png", "jpg", "jpeg"])
 
 if uploaded_file:
-    results = []
-    with st.spinner("กำลังประมวลผล OCR ..."):
-        if uploaded_file.type == "application/pdf":
-            pages = convert_from_bytes(uploaded_file.read(), dpi=400)
-        else:
-            pages = [Image.open(uploaded_file).convert("RGB")]
+    if 'results' not in st.session_state:
+        st.session_state.results = []
 
-        for i, page in enumerate(pages):
-            proc = preprocess_image_for_ocr(page)
-            text1 = pytesseract.image_to_string(proc, lang="tha+eng", config="--psm 6 --oem 3")
-            text2 = pytesseract.image_to_string(proc, lang="tha+eng", config="--psm 11 --oem 3")
-            text = text1 + "\n" + text2
-            data = extract_fields(text)
-            data["page_number"] = i + 1
-            data["image"] = page
-            results.append(data)
+    if not st.session_state.results:
+        with st.spinner("กำลังประมวลผล OCR ..."):
+            if uploaded_file.type == "application/pdf":
+                pages = convert_from_bytes(uploaded_file.read(), dpi=400)
+            else:
+                pages = [Image.open(uploaded_file).convert("RGB")]
 
-    st.subheader("📋 ตารางข้อมูล OCR (แก้ไขได้)")
-    df = pd.DataFrame(results)
-    df = df[["page_number", "date", "invoice_number", "amount"]]
-    df.rename(columns={"page_number": "ลำดับ", "date": "วันที่",
-                       "invoice_number": "เลขที่ตามบิล", "amount": "ยอดก่อน VAT"}, inplace=True)
-    df["ลำดับ"] = df.index + 1
+            for i, page in enumerate(pages):
+                proc = preprocess_image_for_ocr(page)
+                text1 = pytesseract.image_to_string(proc, lang="tha+eng", config="--psm 6 --oem 3")
+                text2 = pytesseract.image_to_string(proc, lang="tha+eng", config="--psm 11 --oem 3")
+                text = text1 + "\n" + text2
+                data = extract_fields(text)
+                data["page_number"] = i + 1
+                data["image"] = page
+                st.session_state.results.append(data)
 
-  
-    edited_df = st.data_editor(df, num_rows="dynamic")
-
-    st.subheader("🖼️ ดูภาพประกอบแต่ละหน้า")
-    for idx, row in enumerate(results):
-        st.markdown(f"### หน้า {idx+1}")
+    st.subheader("📋 แก้ไขข้อมูลแต่ละหน้า")
+    edited_results = []
+    for row in st.session_state.results:
+        st.markdown(f"### หน้า {row['page_number']}")
         st.image(row["image"], use_column_width=True)
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            date_val = st.text_input(f"วันที่ หน้า {row['page_number']}", value=row["date"], key=f"date_{row['page_number']}")
+        with col2:
+            inv_val = st.text_input(f"เลขที่บิล หน้า {row['page_number']}", value=row["invoice_number"], key=f"inv_{row['page_number']}")
+        with col3:
+            amt_val = st.text_input(f"ยอดก่อน VAT หน้า {row['page_number']}", value=row["amount"], key=f"amt_{row['page_number']}")
 
-    excel_file = fill_excel_with_data(edited_df[["วันที่", "เลขที่ตามบิล", "ยอดก่อน VAT"]].to_dict(orient="records"))
+        edited_results.append({"date": date_val, "invoice_number": inv_val, "amount": amt_val})
+
+    st.subheader("💾 ดาวน์โหลด Excel")
+    excel_file = fill_excel_with_data(edited_results)
     st.download_button(
         "⬇️ ดาวน์โหลด Excel",
         data=excel_file,
