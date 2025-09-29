@@ -3,36 +3,55 @@ import pandas as pd
 import re
 import pytesseract
 from pdf2image import convert_from_path
-from openpyxl import Workbook, load_workbook
-from PIL import Image, ImageEnhance
+from openpyxl import Workbook
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 import os
 import io
+import traceback
+from streamlit.logger import get_logger
+
+logger = get_logger(__name__)
 
 # =========================================================
 # การตั้งค่า Tesseract Path สำหรับ Cloud Server
 # =========================================================
 try:
-    # กำหนด Tesseract Path สำหรับ Linux/Cloud Server
     pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
-except Exception:
-    pass
+except Exception as e:
+    st.warning(f"⚠️ การตั้งค่า Tesseract ล้มเหลว: {e}. ตรวจสอบการติดตั้ง Tesseract.")
+    logger.warning(f"Tesseract setup failed: {e}")
 
+def custom_exception_handler(exc_type, exc_value, exc_traceback):
+    st.error(f"❌ เกิดข้อผิดพลาดไม่คาดคิด: {exc_value}")
+    logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+    st.session_state.error_log = traceback.format_exc()
+    if st.button("📋 ดูรายละเอียดข้อผิดพลาด"):
+        st.text(st.session_state.error_log)
+
+# Override global exception handler
+import sys
+sys.excepthook = custom_exception_handler
 
 def enhance_image_for_ocr(image):
     """ปรับปรุงคุณภาพรูปภาพสำหรับ OCR"""
-    # เพิ่ม contrast
-    enhancer = ImageEnhance.Contrast(image)
-    image = enhancer.enhance(2.0)
-    
-    # เพิ่ม sharpness
-    enhancer = ImageEnhance.Sharpness(image)
-    image = enhancer.enhance(1.5)
-    
-    # เพิ่ม brightness เล็กน้อย
-    enhancer = ImageEnhance.Brightness(image)
-    image = enhancer.enhance(1.1)
-    
-    return image
+    try:
+        # เพิ่ม contrast
+        enhancer = ImageEnhance.Contrast(image)
+        image = enhancer.enhance(2.0)
+        
+        # เพิ่ม sharpness
+        enhancer = ImageEnhance.Sharpness(image)
+        image = enhancer.enhance(1.5)
+        
+        # เพิ่ม brightness เล็กน้อย
+        enhancer = ImageEnhance.Brightness(image)
+        image = enhancer.enhance(1.1)
+        
+        return image
+    except Exception as e:
+        st.warning(f"⚠️ การปรับภาพล้มเหลว: {e}. ใช้ภาพดั้งเดิมแทน.")
+        logger.warning(f"Image enhancement failed: {e}")
+        return image
 
 def extract_ocr_from_pdf(pdf_bytes):
     """แปลง PDF เป็น OCR Text และคืนค่าทั้ง text และ images"""
@@ -79,6 +98,7 @@ def extract_ocr_from_pdf(pdf_bytes):
         if os.path.exists(temp_file):
             os.remove(temp_file)
         st.error(f"❌ เกิดข้อผิดพลาดในการแปลง PDF: {str(e)}")
+        logger.error(f"PDF conversion failed: {e}")
         return []
 
 def clean_amount(raw_amount):
@@ -92,7 +112,6 @@ def clean_amount(raw_amount):
         return f"{float(cleaned):.2f}"
     except ValueError:
         return ""
-
 
 def extract_data_from_ocr_text(text):
     """ดึงข้อมูลจากข้อความ OCR"""
@@ -126,19 +145,19 @@ def extract_data_from_ocr_text(text):
     
     # --- 3. การดึงยอดก่อน VAT (มูลค่าสินค้า) - เน้นตำแหน่งที่แน่นอน ---
     
-    # 3.1 Deep Fallback (หลัก): ดึงตัวเลขที่อยู่ระหว่าง 'หักส่วนลด' และ 'จำนวนภาษีมูลค่าเพิ่ม'
+    # 3.1 Fuzzy Regex (หลัก): ค้นหาคำนำหน้า 'มูลค่าสินค้า' หรือ 'Product Value'
+    fuzzy_pattern = r"(?:[มม]*ูลค่าสินค้า|Product\s*Value)\s*[.,:\s\n\r]*\s*([,\d]+\.\d{2})"
+    
+    # 3.2 Deep Fallback (สำรอง): ดึงตัวเลขที่อยู่ระหว่าง 'หักส่วนลด' และ 'จำนวนภาษีมูลค่าเพิ่ม'
     # ใช้นี่เพราะมูลค่าสินค้ามักจะเป็นตัวเลขที่อยู่ระหว่าง Discount กับ VAT
     # ใช้ re.DOTALL เพื่อให้ค้นหาข้ามบรรทัดได้
     deep_fallback_pattern = r"(?:หักส่วนลด|Less Discount)(?:.|\n)*?([,\d]+\.\d{2})\s*(?:จำนวนภาษีมูลค่าเพิ่ม|7.00 %)"
-
-    # 3.2 Fuzzy Regex (สำรอง): ค้นหาคำนำหน้า 'มูลค่าสินค้า'
-    fuzzy_pattern = r"(?:[มม]*ูลค่าสินค้า|Product\s*Value)\s*[.,:\s\n\r]*\s*([,\d]+\.\d{2})"
     
-    amount_match = re.search(deep_fallback_pattern, text, re.IGNORECASE | re.DOTALL)
+    amount_match = re.search(fuzzy_pattern, text, re.IGNORECASE | re.DOTALL)
     
-    # ถ้าหาแบบ Deep Fallback ไม่เจอ ให้ลองหาแบบ Fuzzy
+    # ถ้าหาแบบ Fuzzy ไม่เจอ ให้ลองหาแบบ Deep Fallback
     if not amount_match:
-        amount_match = re.search(fuzzy_pattern, text, re.IGNORECASE | re.DOTALL)
+        amount_match = re.search(deep_fallback_pattern, text, re.IGNORECASE | re.DOTALL)
 
     if amount_match:
         # group(1) คือตัวเลขที่ถูกจับกลุ่ม
@@ -314,7 +333,7 @@ def main():
                             st.rerun() 
                     
                     with col2:
-                        st.subheader("🖼️ รูปภาพ OCR & Text (ต้นฉบับ):")
+                        st.subheader("🖼์ รูปภาพ OCR & Text (ต้นฉบับ):")
                         st.image(result['image'], use_container_width=True)
                         
                         with st.expander("📝 ข้อความ OCR ดิบ (Raw Text)"):
@@ -325,13 +344,57 @@ def main():
                                 key=f"ocr_text_{page_key}"
                             )
             
+            # --- Global Table for Final Edits ---
+            if st.session_state.extracted_data:
+                st.header("3. 📊 แก้ไขข้อมูลรวม (ถ้าจำเป็น)")
+                st.info("คุณสามารถแก้ไขข้อมูลทั้งหมดในตารางนี้ก่อนดาวน์โหลด")
+                
+                # แปลงข้อมูลที่บันทึกเป็น DataFrame
+                global_data = [{'ลำดับ': i+1, 'วันที่': d['date'], 'เลขที่ตามบิล': d['invoice_number'], 'ยอดก่อน VAT': d['amount']} 
+                               for i, d in enumerate(sorted(st.session_state.extracted_data, key=lambda x: x['page_number']))]
+                
+                global_df = pd.DataFrame(global_data)
+                
+                # ตัวกรอง
+                search_term = st.text_input("🔍 ค้นหาในตารางรวม", placeholder="พิมพ์เพื่อค้นหา...")
+                if search_term:
+                    global_df = global_df[global_df.apply(lambda row: search_term.lower() in str(row).lower(), axis=1)]
+                
+                # ตารางแก้ไขรวม
+                edited_global_df = st.data_editor(
+                    global_df,
+                    column_config={
+                        "ลำดับ": st.column_config.NumberColumn("ลำดับ", disabled=True),
+                        "วันที่": st.column_config.TextColumn("วันที่", help="รูปแบบ: DD/MM/YY"),
+                        "เลขที่ตามบิล": st.column_config.TextColumn("เลขที่ตามบิล", help="เช่น HH6800470"),
+                        "ยอดก่อน VAT": st.column_config.TextColumn(
+                            "ยอดก่อน VAT",
+                            help="ตัวอย่าง: 4710.28 (ใช้จุดทศนิยม)"
+                        )
+                    },
+                    use_container_width=True,
+                    num_rows="dynamic"
+                )
+                
+                if st.button("💾 บันทึกการเปลี่ยนแปลงรวม", type="primary"):
+                    # อัปเดตข้อมูลใน session_state จากตารางแก้ไข
+                    for i, row in edited_global_df.iterrows():
+                        page_key = i + 1  # ลำดับเริ่มจาก 1
+                        existing = next((d for d in st.session_state.extracted_data if d['page_number'] == page_key), None)
+                        if existing:
+                            existing['date'] = row['วันที่']
+                            existing['invoice_number'] = row['เลขที่ตามบิล']
+                            existing['amount'] = row['ยอดก่อน VAT']
+                    st.success("✅ อัปเดตข้อมูลรวมสำเร็จ!")
+                    st.rerun()
+            
             # --- Step 4: Create Excel ---
             if st.session_state.extracted_data:
-                st.header("3. 💾 ดาวน์โหลดไฟล์ Excel")
+                st.header("4. 💾 ดาวน์โหลดไฟล์ Excel")
                 
                 # แสดงสรุปข้อมูลที่จะกรอกลง Excel
-                df_summary = pd.DataFrame(st.session_state.extracted_data)
-                df_summary = df_summary.sort_values(by='page_number').reset_index(drop=True)
+                df_summary = pd.DataFrame(sorted(st.session_state.extracted_data, key=lambda x: x['page_number']))
+                df_summary = df_summary.reset_index(drop=True)
                 
                 st.subheader("📋 สรุปข้อมูลที่ถูกบันทึกแล้ว:")
                 st.dataframe(df_summary, use_container_width=True, height=300)
