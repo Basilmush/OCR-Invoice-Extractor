@@ -7,6 +7,7 @@ from pdf2image import convert_from_bytes
 from PIL import Image, ImageEnhance
 import io
 import re
+import base64
 
 # ================================
 # ตั้งค่า Tesseract
@@ -91,12 +92,30 @@ def fill_excel(data_list):
     output.seek(0)
     return output
 
+def pil_to_base64(img):
+    buffered = io.BytesIO()
+    img.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode()
+
 # ================================
 # Streamlit App
 # ================================
 st.set_page_config(page_title="OCR Invoice Tool", layout="wide")
 st.title("📄 OCR & Editable Invoice Viewer")
 st.write("อัปโหลด PDF / รูปภาพ → OCR → แก้ไขใต้ภาพ → ดาวน์โหลด Excel")
+
+# CSS จัดภาพตรงกลาง
+st.markdown("""
+    <style>
+    .center-img {
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+        width: 60%;
+        max-width: 800px;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 uploaded_file = st.file_uploader("อัปโหลด PDF หรือ รูปภาพ", type=["pdf", "png", "jpg", "jpeg"])
 
@@ -123,7 +142,8 @@ if uploaded_file:
     edited_results = []
     for row in st.session_state.results:
         st.markdown(f"### หน้า {row['page_number']}")
-        st.image(row["image"], use_column_width=False, width=400)
+        img_base64 = pil_to_base64(row["image"])
+        st.markdown(f'<img src="data:image/png;base64,{img_base64}" class="center-img"/>', unsafe_allow_html=True)
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -143,5 +163,3 @@ if uploaded_file:
         file_name="Invoice_Data.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
-
