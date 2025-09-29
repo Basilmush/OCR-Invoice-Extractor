@@ -82,16 +82,16 @@ def extract_ocr_from_pdf(pdf_bytes):
         return []
 
 def clean_amount(raw_amount):
-    """ทำความสะอาดตัวเลขที่ดึงมา (ลบคอมมาและแปลงเป็นทศนิยมสองหลัก)"""
+    """ทำความสะอาดตัวเลขที่ดึงมา (ลบคอมมาและแปลงเป็น float)"""
     if not raw_amount:
-        return ""
+        return 0.0
     # ลบเครื่องหมายที่ไม่ใช่ตัวเลขหรือจุดทศนิยม
     cleaned = re.sub(r'[^\d\.]', '', raw_amount.replace(',', ''))
     try:
         # ตรวจสอบว่าเป็นตัวเลขจริงหรือไม่
-        return f"{float(cleaned):.2f}"
+        return float(cleaned)
     except ValueError:
-        return ""
+        return 0.0
 
 
 def extract_data_from_ocr_text(text):
@@ -104,11 +104,9 @@ def extract_data_from_ocr_text(text):
     }
     
     # --- 1. การดึงเลขที่ HH (แข็งแกร่งที่สุด) ---
-    # ค้นหาคำว่า 'เลขที' หรือ 'No' แล้วตามด้วย HHxxxxxx โดยยอมให้มีอักขระที่ไม่ใช่ตัวอักษรคั่น
     invoice_pattern = r'(?:เลขที|No)[.,:\s\n\r]*\s*([H]\w{6,8})'
     invoice_matches = re.search(invoice_pattern, text, re.IGNORECASE)
     if not invoice_matches:
-        # Fallback: หา HHxxxxxx ที่ไหนก็ได้
         invoice_pattern = r'(HH\d{6,8})'
         invoice_matches = re.search(invoice_pattern, text)
 
@@ -116,34 +114,58 @@ def extract_data_from_ocr_text(text):
         data['invoice_number'] = invoice_matches.group(1)
         data['raw_matches']['invoices_found'] = [data['invoice_number']]
     
-    # --- 2. การดึงวันที่ (แข็งแกร่งกว่าเดิม) ---
-    # ค้นหา วันที่ หรือ Date แล้วตามด้วย DD/MM/YY
+    # --- 2. การดึงวันที่ ---
     date_pattern = r'(?:วันที|Date)\s*[.,:\s\n\r]*(\d{1,2}/\d{1,2}/\d{2,4})'
     date_matches = re.search(date_pattern, text, re.IGNORECASE)
     if date_matches:
         data['date'] = date_matches.group(1)
         data['raw_matches']['dates_found'] = [data['date']]
     
-    # --- 3. การดึงยอดก่อน VAT (มูลค่าสินค้า) - เน้นตำแหน่งที่แน่นอน ---
+    # --- 3. การดึงยอดเพื่อคำนวณ (Total และ VAT Amount) ---
     
-    # 3.1 Deep Fallback (หลัก): ดึงตัวเลขที่อยู่ระหว่าง 'หักส่วนลด' และ 'จำนวนภาษีมูลค่าเพิ่ม'
-    # ปรับปรุง: ใช้คำที่ยืดหยุ่นขึ้น เช่น 'สิuค้า' หรือ 'ภาษีมูลค่าเwม' เพื่อรองรับ OCR ที่ผิดพลาด
+    # 3.1 ดึง Total Invoice
+    total_pattern = r"(?:จำนวนเงินรวมทั้งสิ้น|Total Invoice)(?:.|\n)*?([,\d]+\.\d{2})"
+    total_match = re.search(total_pattern, text, re.IGNORECASE | re.DOTALL)
+    
+    total_invoice = clean_amount(total_match.group(1)) if total_match else 0.0
+
+    # 3.2 ดึง VAT Amount (จำนวนภาษีมูลค่าเพิ่ม)
+    vat_pattern = r"(?:จำนวนภาษีมูลค่าเพิ่ม|7.00\s*%)[^,\d]*?([,\d]+\.\d{2})"
+    vat_match = re.search(vat_pattern, text, re.IGNORECASE | re.DOTALL)
+    
+    vat_amount = clean_amount(vat_match.group(1)) if vat_match else 0.0
+
+    # 3.3 ดึงมูลค่าสินค้า (ยอดก่อน VAT) โดยตรง (ใช้ในการเปรียบเทียบ)
     deep_fallback_pattern = r"(?:หักส[่วน]*ลด|Less Discount)(?:.|\n)*?([,\d]+\.\d{2})\s*(?:จำนวนภาษีมูลค่าเพิ่ม|7.00\s*%)"
-
-    # 3.2 Fuzzy Regex (สำรอง): ค้นหาคำนำหน้า 'มูลค่าสินค้า'
-    fuzzy_pattern = r"(?:[มม]*ูลค่าสินค้า|Product\s*Value)\s*[.,:\s\n\r]*\s*([,\d]+\.\d{2})"
+    amount_match_ocr = re.search(deep_fallback_pattern, text, re.IGNORECASE | re.DOTALL)
     
-    amount_match = re.search(deep_fallback_pattern, text, re.IGNORECASE | re.DOTALL)
+    # --- 4. การตัดสินใจเลือกค่าที่ถูกต้อง (Validation Logic) ---
     
-    # ถ้าหาแบบ Deep Fallback ไม่เจอ ให้ลองหาแบบ Fuzzy
-    if not amount_match:
-        amount_match = re.search(fuzzy_pattern, text, re.IGNORECASE | re.DOTALL)
+    calculated_amount = 0.0
+    
+    # วิธีที่ 1: คำนวณจาก Total - VAT (แม่นยำมากถ้าสองค่านี้ถูกดึงมา)
+    if total_invoice > 0.0 and vat_amount > 0.0:
+        # คำนวณแล้วปัดเศษให้เท่ากับค่าทศนิยมสองตำแหน่ง (แก้ปัญหา floating point)
+        calculated_amount = round(total_invoice - vat_amount, 2)
+    
+    # วิธีที่ 2: ใช้ค่า OCR โดยตรง (ถ้ามีและดูสมเหตุสมผล)
+    ocr_amount = 0.0
+    if amount_match_ocr:
+        ocr_amount = clean_amount(amount_match_ocr.group(1))
 
-    if amount_match:
-        # group(1) คือตัวเลขที่ถูกจับกลุ่ม
-        raw_amount = amount_match.group(1)
-        data['amount'] = clean_amount(raw_amount)
-            
+    # การตัดสินใจ (Decision)
+    if calculated_amount > 0.0:
+        # ใช้ค่าจากการคำนวณเพราะมีความแม่นยำทางคณิตศาสตร์สูงกว่า
+        data['amount'] = f"{calculated_amount:.2f}"
+    elif ocr_amount > 0.0:
+        # ถ้าคำนวณไม่ได้ ให้ใช้ค่าที่ดึงโดยตรงจาก OCR
+        data['amount'] = f"{ocr_amount:.2f}"
+    else:
+        # ถ้าหาไม่ได้เลย ให้แสดงเป็นค่าว่าง
+        data['amount'] = ""
+
+    data['raw_matches']['calculated_total'] = f"{total_invoice:.2f}"
+    data['raw_matches']['calculated_vat'] = f"{vat_amount:.2f}"
     data['raw_matches']['amounts_found'] = [data['amount']]
     
     return data
