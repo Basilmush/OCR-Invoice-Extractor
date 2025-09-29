@@ -123,7 +123,7 @@ if uploaded_file:
     edited_results = []
     for row in st.session_state.results:
         st.markdown(f"### หน้า {row['page_number']}")
-        st.image(row["image"], use_column_width=False, width=600)
+        st.image(row["image"], use_column_width=False, width=400)
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -143,4 +143,5 @@ if uploaded_file:
         file_name="Invoice_Data.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
 
