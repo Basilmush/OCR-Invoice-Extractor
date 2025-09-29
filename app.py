@@ -17,18 +17,6 @@ pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 # ================================
 # Helper Functions
 # ================================
-def crop_table_area(pil_img):
-    """
-    Crop ส่วนของตารางที่มีวันที่, เลขบิล, ยอดก่อน VAT
-    ปรับค่า crop_box ตาม layout เอกสารจริง
-    """
-    width, height = pil_img.size
-    left = int(width * 0.05)
-    upper = int(height * 0.2)
-    right = int(width * 0.95)
-    lower = int(height * 0.9)
-    return pil_img.crop((left, upper, right, lower))
-
 def preprocess_image_for_ocr(pil_img):
     """ปรับปรุงคุณภาพภาพด้วย PIL + OpenCV"""
     # PIL Enhance
@@ -43,11 +31,11 @@ def preprocess_image_for_ocr(pil_img):
     img = np.array(pil_img.convert("RGB"))
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
-    # Adaptive Threshold
+    # Adaptive Threshold (เบา ๆ)
     thresh = cv2.adaptiveThreshold(
         gray, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 35, 15
+        cv2.THRESH_BINARY, 41, 15
     )
 
     # Denoise
@@ -84,13 +72,18 @@ def extract_fields(text):
             data["invoice_number"] = m.group(1)
             break
 
-    # ยอดก่อน VAT
-    amt_patterns = [r"([0-9,]+\.\d{2})\s*(?=บาท|THB|ก่อน VAT)", r"(?:มูลค่าสินค้า|Subtotal|ก่อนภาษี).*?([0-9,]+\.\d{2})"]
+    # ยอดก่อน VAT (flexible)
+    # ดึงตัวเลขที่อยู่ใกล้คำว่า Total / มูลค่า / Subtotal / จำนวนเงิน
+    amt_patterns = [
+        r"(?:มูลค่าสินค้า|Subtotal|ก่อนภาษี|จำนวนเงินรวมทั้งสิ้น|Total).*?([0-9,]+\.\d{2})",
+        r"([0-9,]+\.\d{2})"
+    ]
     for p in amt_patterns:
         m = re.search(p, text, re.DOTALL | re.IGNORECASE)
         if m:
             data["amount"] = clean_amount(m.group(1))
-            break
+            if data["amount"]:
+                break
 
     return data
 
@@ -109,8 +102,8 @@ def fill_excel_with_data(data_list):
 # ================================
 # Streamlit App
 # ================================
-st.title("📄 OCR Extractor for Invoice PDF with Table Crop")
-st.write("อัปโหลด PDF → OCR (crop ตาราง) → ตรวจสอบ/แก้ไข → ดาวน์โหลด Excel")
+st.title("📄 OCR Extractor for Invoice PDF (Full Page)")
+st.write("อัปโหลด PDF → OCR → ตรวจสอบ/แก้ไข → ดาวน์โหลด Excel")
 
 uploaded_file = st.file_uploader("อัปโหลด PDF", type="pdf")
 
@@ -122,13 +115,10 @@ if uploaded_file:
         results = []
 
         for i, page in enumerate(pages):
-            # Crop table
-            cropped_page = crop_table_area(page)
-
             # Preprocess
-            proc = preprocess_image_for_ocr(cropped_page)
+            proc = preprocess_image_for_ocr(page)
 
-            # OCR หลายครั้ง (psm 6 + 11)
+            # OCR หลายครั้ง (psm 6 + 11) เพื่อแม่นยำขึ้น
             text1 = pytesseract.image_to_string(proc, lang="tha+eng", config="--psm 6 --oem 3")
             text2 = pytesseract.image_to_string(proc, lang="tha+eng", config="--psm 11 --oem 3")
             text = text1 + "\n" + text2
