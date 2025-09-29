@@ -53,9 +53,9 @@ def optimize_image_for_ocr(image):
 def extract_invoice_data_precise(ocr_text):
     """ดึงข้อมูลแบบแม่นยำสูง ตามข้อมูลจริงที่ให้มา"""
     
-    # ทำความสะอาด text
-    clean_text = re.sub(r'\s+', ' ', ocr_text.strip())
-    lines = ocr_text.split('\n')
+    # แยก lines และทำความสะอาด
+    lines = [line.strip() for line in ocr_text.split('\n') if line.strip()]
+    clean_text = ' '.join(lines)  # สำหรับ fallback
     
     result = {
         'date': '',
@@ -65,59 +65,79 @@ def extract_invoice_data_precise(ocr_text):
         'debug_matches': {}
     }
     
-    # === 1. ดึงวันที่: เฉพาะ XX/08/68 ===
-    # จากข้อมูลจริง: 01/08/68, 02/08/68, 03/08/68...
+    # === 1. ดึงวันที่ โดยค้นหาใน line ที่มี 'Date' หรือ 'วันที่' ===
     date_patterns = [
-        r'(\d{2}/08/68)',                    # XX/08/68 แน่นอน
-        r'(\d{1,2}/08/68)',                  # X/08/68
-        r'วันที[่ิ]*[:\s]*(\d{1,2}/08/68)',  # วันที่: XX/08/68
-        r'Date[:\s]*(\d{1,2}/08/68)',       # Date: XX/08/68
-        r'(\d{1,2}/\d{1,2}/68)',            # XX/XX/68 ทั่วไป
+        r'(\d{2}/08/68)',
+        r'(\d{1,2}/08/68)',
     ]
     
-    all_date_matches = []
-    for pattern in date_patterns:
-        matches = re.findall(pattern, clean_text, re.IGNORECASE)
-        all_date_matches.extend(matches)
+    for line in lines:
+        if 'Date' in line or 'วันที่' in line:
+            for pattern in date_patterns:
+                match = re.search(pattern, line)
+                if match:
+                    result['date'] = match.group(1)
+                    result['confidence'] += 30
+                    result['debug_matches']['date_line'] = line
+                    break
+            if result['date']:
+                break
     
-    result['debug_matches']['dates'] = all_date_matches
+    # Fallback ถ้าไม่พบ
+    if not result['date']:
+        all_date_matches = []
+        for pattern in date_patterns:
+            matches = re.findall(pattern, clean_text)
+            all_date_matches.extend(matches)
+        if all_date_matches:
+            for date_str in all_date_matches:
+                if '/08/68' in date_str:
+                    result['date'] = date_str
+                    result['confidence'] += 20  # lower confidence
+                    break
     
-    # เลือกวันที่ที่มี 08/68
-    for date_str in all_date_matches:
-        if '/08/68' in date_str:
-            result['date'] = date_str
-            result['confidence'] += 30
-            break
-    
-    # === 2. ดึงเลขที่: HH68004XX, HH68005XX ===
-    # จากข้อมูลจริง: HH6800470, HH6800474, HH6800475...
+    # === 2. ดึงเลขที่ โดยค้นหาใน line ที่มี 'No.' หรือ 'เลขที่' ===
     invoice_patterns = [
-        r'(HH68004\d{2})',                   # HH68004XX
-        r'(HH68005\d{2})',                   # HH68005XX  
-        r'(HH6800\d{3})',                    # HH6800XXX
-        r'เลขที[่ิ]*[:\s]*(HH\d{7})',       # เลขที่: HHXXXXXXX
-        r'No[.:\s]*(HH\d{7})',              # No. HHXXXXXXX
-        r'(HH\d{7})',                        # HHXXXXXXX ตรง ๆ
+        r'(HH68004\d{2})',
+        r'(HH68005\d{2})',
+        r'(HH6800\d{3})',
+        r'(HH\d{7})',
     ]
     
-    all_invoice_matches = []
-    for pattern in invoice_patterns:
-        matches = re.findall(pattern, clean_text, re.IGNORECASE)
-        all_invoice_matches.extend(matches)
+    for line in lines:
+        if 'No.' in line or 'เลขที่' in line:
+            for pattern in invoice_patterns:
+                match = re.search(pattern, line, re.IGNORECASE)
+                if match:
+                    inv = match.group(1)
+                    if inv.startswith('HH6800') and len(inv) == 9:
+                        result['invoice_number'] = inv
+                        result['confidence'] += 30
+                        result['debug_matches']['invoice_line'] = line
+                        break
+            if result['invoice_number']:
+                break
     
-    result['debug_matches']['invoices'] = all_invoice_matches
+    # Fallback
+    if not result['invoice_number']:
+        all_invoice_matches = []
+        for pattern in invoice_patterns:
+            matches = re.findall(pattern, clean_text, re.IGNORECASE)
+            all_invoice_matches.extend(matches)
+        if all_invoice_matches:
+            for inv in all_invoice_matches:
+                if inv.startswith('HH6800') and len(inv) == 9:
+                    result['invoice_number'] = inv
+                    result['confidence'] += 20
+                    break
     
-    # เลือกเลขที่ที่ตรง pattern มากที่สุด
-    for inv in all_invoice_matches:
-        if inv.startswith('HH6800') and len(inv) == 9:
-            result['invoice_number'] = inv
-            result['confidence'] += 30
-            break
+    # === 3. ดึงยอดเงิน โดยค้นหาใน line ที่มี 'Product Value' หรือ 'มูลค่าสินค้า' ===
+    amount_context_patterns = [
+        r'Product Value\s*([,\d]+\.\d{2})',
+        r'มูลค่าสินค้า\s*([,\d]+\.\d{2})',
+        r'([,\d]+\.\d{2})\s*(?:บาท)?\s*(?:7\.00\s*%|VAT)',
+    ]
     
-    # === 3. ดึงยอดเงิน: ตัวเลข 4-5 หลัก.XX ===
-    # จากข้อมูลจริง: 4710.28, 16549.53, 17433.64, 12910.28...
-    
-    # รูปแบบยอดเงินจากข้อมูลจริง
     known_amounts = [
         "4710.28", "16549.53", "17433.64", "12910.28", "21648.60",
         "7777.57", "20151.40", "17932.71", "14214.95", "15671.03",
@@ -125,54 +145,64 @@ def extract_invoice_data_precise(ocr_text):
         "7970.09", "28581.31", "17891.59"
     ]
     
-    # สร้าง pattern จากข้อมูลจริง
-    amount_patterns = [
-        # Pattern 1: หาตัวเลขที่ตรงกับข้อมูลจริง
-        r'\b(' + '|'.join([amt.replace('.', r'\.') for amt in known_amounts]) + r')\b',
-        
-        # Pattern 2: หาจากคำนำหน้า
-        r'(?:มูลค่าสินค้า|Product\s*Value)[:\s]*([,\d]+\.\d{2})',
-        
-        # Pattern 3: หาจากบริบท VAT
-        r'([,\d]+\.\d{2})\s*(?:บาท)?\s*(?:7\.00\s*%|VAT)',
-        
-        # Pattern 4: ตัวเลข 4-5 หลัก.XX
-        r'\b(\d{4,5}\.\d{2})\b',
-        
-        # Pattern 5: มี comma คั่น
-        r'\b(\d{1,2},\d{3}\.\d{2})\b',
-        
-        # Pattern 6: ในบรรทัดที่มีคำ "รวม" หรือ "total"
-        r'(?:รวม|Total|Net)[^0-9\n]*([,\d]+\.\d{2})',
-    ]
+    found_amount = False
+    for line in lines:
+        # Context patterns
+        for pattern in amount_context_patterns:
+            match = re.search(pattern, line, re.IGNORECASE)
+            if match:
+                raw_amount = match.group(1)
+                clean_amount = raw_amount.replace(',', '')
+                try:
+                    amount_value = float(clean_amount)
+                    if 4000 <= amount_value <= 30000:
+                        result['amount'] = clean_amount
+                        result['confidence'] += 40
+                        result['debug_matches']['amount_line'] = line
+                        found_amount = True
+                        break
+                except ValueError:
+                    continue
+        if found_amount:
+            break
     
-    all_amount_matches = []
-    for i, pattern in enumerate(amount_patterns):
-        matches = re.findall(pattern, clean_text, re.IGNORECASE)
-        for match in matches:
-            clean_amount = match.replace(',', '')
-            try:
-                amount_value = float(clean_amount)
-                # กรองตามช่วงของข้อมูลจริง (4,710 - 28,581)
-                if 4000 <= amount_value <= 30000:
-                    all_amount_matches.append({
-                        'amount': clean_amount,
-                        'value': amount_value,
-                        'pattern_priority': i,
-                        'raw': match
-                    })
-            except ValueError:
-                continue
+    # Fallback to known amounts if not found
+    if not found_amount:
+        for line in lines:
+            for amt in known_amounts:
+                if amt in line:
+                    result['amount'] = amt
+                    result['confidence'] += 30
+                    result['debug_matches']['amount_line'] = line
+                    found_amount = True
+                    break
+            if found_amount:
+                break
     
-    result['debug_matches']['amounts'] = [amt['raw'] for amt in all_amount_matches]
+    # Fallback เพิ่มเติมถ้ายังไม่พบ
+    if not found_amount:
+        fallback_patterns = [
+            r'\b(\d{4,5}\.\d{2})\b',
+            r'\b(\d{1,2},\d{3}\.\d{2})\b',
+            r'(?:รวม|Total|Net)[^0-9\n]*([,\d]+\.\d{2})',
+        ]
+        all_amount_matches = []
+        for pattern in fallback_patterns:
+            matches = re.findall(pattern, clean_text, re.IGNORECASE)
+            for match in matches:
+                clean_amount = match.replace(',', '')
+                try:
+                    amount_value = float(clean_amount)
+                    if 4000 <= amount_value <= 30000:
+                        all_amount_matches.append(clean_amount)
+                except ValueError:
+                    continue
+        if all_amount_matches:
+            # เลือกตัวแรก (หรือสามารถเลือกตาม logic อื่น)
+            result['amount'] = all_amount_matches[0]
+            result['confidence'] += 20
     
-    # เลือกยอดเงินที่ดีที่สุด
-    if all_amount_matches:
-        # เรียงตาม pattern priority (pattern แรกสำคัญที่สุด)
-        all_amount_matches.sort(key=lambda x: x['pattern_priority'])
-        best_amount = all_amount_matches[0]
-        result['amount'] = best_amount['amount']
-        result['confidence'] += 40
+    result['debug_matches']['lines_sample'] = lines[:10]  # เก็บ lines บางส่วน debug
     
     return result
 
@@ -231,8 +261,19 @@ def process_pdf_ultra_fast(pdf_bytes):
             except:
                 pass
             
-            # รวม text ทั้งหมด
-            combined_text = " ".join(ocr_texts)
+            # Config 3: โหมดอัตโนมัติ
+            try:
+                text3 = pytesseract.image_to_string(
+                    optimized_image,
+                    lang="tha+eng",
+                    config="--psm 3 --oem 3"
+                )
+                ocr_texts.append(text3)
+            except:
+                pass
+            
+            # รวม text ทั้งหมด โดยรักษา lines
+            combined_text = "\n".join(ocr_texts)
             
             # ดึงข้อมูล
             extracted_data = extract_invoice_data_precise(combined_text)
@@ -292,7 +333,7 @@ def create_final_excel(data_list, filename):
                 len([d for d in data_list if d['date']]),
                 len([d for d in data_list if d['invoice_number']]),
                 len([d for d in data_list if d['amount']]),
-                sum([float(d['amount']) for d in data_list if d['amount']]) if any(d['amount'] for d in data_list) else 0
+                sum([float(d['amount']) if d['amount'] else 0 for d in data_list])
             ]
         }
         
@@ -400,11 +441,8 @@ def main():
                         st.metric("ยอดเงินถูกต้อง", f"{valid_amounts}/{total_pages}")
                     
                     # คำนวณยอดรวม
-                    try:
-                        total_amount = sum([float(r['amount']) for r in results if r['amount']])
-                        st.metric("💰 ยอดรวมทั้งหมด", f"{total_amount:,.2f} บาท")
-                    except:
-                        st.metric("💰 ยอดรวมทั้งหมด", "ไม่สามารถคำนวณได้")
+                    total_amount = sum([float(r['amount']) if r['amount'] else 0 for r in results])
+                    st.metric("💰 ยอดรวมทั้งหมด", f"{total_amount:,.2f} บาท")
                     
                     # สร้างและดาวน์โหลดไฟล์ Excel
                     st.markdown("---")
@@ -434,9 +472,9 @@ def main():
                     for i, result in enumerate(results, 1):
                         debug_info = {
                             'หน้า': i,
-                            'วันที่ที่พบ': ', '.join(result.get('debug_matches', {}).get('dates', [])),
-                            'เลขที่ที่พบ': ', '.join(result.get('debug_matches', {}).get('invoices', [])),
-                            'ยอดเงินที่พบ': ', '.join(result.get('debug_matches', {}).get('amounts', [])),
+                            'วันที่ที่พบ': result.get('debug_matches', {}).get('date_line', ''),
+                            'เลขที่ที่พบ': result.get('debug_matches', {}).get('invoice_line', ''),
+                            'ยอดเงินที่พบ': result.get('debug_matches', {}).get('amount_line', ''),
                             'ผลลัพธ์สุดท้าย': f"{result['date']} | {result['invoice_number']} | {result['amount']}"
                         }
                         debug_data.append(debug_info)
