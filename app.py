@@ -108,12 +108,20 @@ def extract_data_from_ocr_text(text):
         data['raw_matches']['invoices_found'] = invoice_matches
     
     # Pattern สำหรับมูลค่าสินค้า (ยอดก่อน VAT)
-    # Regex ขั้นสุดท้าย: ครอบคลุมคำว่า 'มูลค่าสินค้า' หรือ 'Product Value' 
-    # และจับกลุ่มตัวเลขที่อยู่บรรทัดเดียวกันหรือบรรทัดถัดไป
-    amount_pattern = r"(?:มูลค่าสินค้า|Product Value)\s*[\n\r]*\s*([,\d]+\.\d{2})"
+    # 1. Regex ที่ปรับปรุง: ใช้การค้นหาแบบยืดหยุ่นสำหรับคำนำหน้าและจับตัวเลขที่อยู่ใกล้เคียง
+    #    ค้นหาคำที่ขึ้นต้นด้วย ม(ม)ูลค่าสินค้า หรือ Product Value โดยไม่สนตัวอักษรที่ขาดหายไป
+    amount_pattern_fuzzy = r"(?:[มม]*ูลค่าสินค้า|Product\s*Value)\s*[.,:\s\n\r]*\s*([,\d]+\.\d{2})"
     
-    amount_match = re.search(amount_pattern, text, re.IGNORECASE)
+    # 2. Regex สำรอง: ค้นหาตัวเลขที่มีรูปแบบ Gross Amount / Total Invoice
+    #    หากค่าแรกผิดพลาด ให้หาตัวเลขที่คล้ายกันในพื้นที่ใกล้เคียง
+    amount_pattern_fallback = r"(?:รวมเป็นเงิน|Total Invoice)\s*[\n\r]*\s*([,\d]+\.\d{2})"
     
+    amount_match = re.search(amount_pattern_fuzzy, text, re.IGNORECASE)
+    
+    # ถ้าหาแบบ Fuzzy ไม่เจอ ให้ลองหาแบบ Fallback (อาจได้ Total Invoice แทน)
+    if not amount_match:
+        amount_match = re.search(amount_pattern_fallback, text, re.IGNORECASE)
+
     if amount_match:
         # group(1) คือตัวเลขที่ถูกจับกลุ่ม
         raw_amount = amount_match.group(1).replace(',', '')
