@@ -32,6 +32,16 @@ def preprocess_image_for_ocr(pil_img):
     denoised = cv2.medianBlur(thresh, 3)
     return denoised
 
+def clean_amount(val):
+    """เช็คความสมเหตุสมผลของยอด OCR"""
+    try:
+        num = float(val.replace(",", ""))
+        if num <= 0 or num > 100000:  # กำหนด threshold
+            return ""
+        return f"{num:.2f}"
+    except:
+        return ""
+
 def extract_fields(text):
     """ดึงวันที่, เลขที่บิล, ยอดก่อน VAT"""
     data = {"date": "", "invoice_number": "", "amount": ""}
@@ -66,7 +76,7 @@ def extract_fields(text):
     for p in amt_patterns:
         m = re.search(p, text, re.DOTALL | re.IGNORECASE)
         if m:
-            data["amount"] = m.group(1).replace(",", "")
+            data["amount"] = clean_amount(m.group(1))
             break
 
     return data
@@ -106,7 +116,7 @@ if uploaded_file:
             results.append(data)
 
     # แสดงผล OCR ที่ดึงได้
-    st.subheader("🔍 ข้อมูลที่ OCR เจอ")
+    st.subheader("🔍 ข้อมูลที่ OCR เจอ (ตรวจสอบก่อนโหลด)")
     df_results = pd.DataFrame(results)[["page_number", "date", "invoice_number", "amount"]]
     st.dataframe(df_results)
 
