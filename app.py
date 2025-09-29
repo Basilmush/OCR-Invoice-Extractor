@@ -4,7 +4,9 @@ import re
 import pytesseract
 from pdf2image import convert_from_path
 from openpyxl import Workbook, load_workbook
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageFilter
+import cv2
+import numpy as np
 import os
 import io
 
@@ -17,18 +19,59 @@ try:
 except Exception:
     pass
 
+def advanced_image_preprocessing(image):
+    """ปรับปรุงรูปภาพสำหรับ OCR ด้วยเทคนิคขั้นสูง"""
+    try:
+        # แปลงเป็น numpy array
+        img_array = np.array(image)
+        
+        # แปลงเป็น grayscale
+        if len(img_array.shape) == 3:
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img_array
+        
+        # 1. Gaussian Blur เพื่อลด noise
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        
+        # 2. Adaptive Threshold สำหรับข้อความที่มีความแตกต่างของแสง
+        adaptive_thresh = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+        )
+        
+        # 3. Morphological operations เพื่อทำความสะอาดข้อความ
+        kernel = np.ones((2, 2), np.uint8)
+        morph = cv2.morphologyEx(adaptive_thresh, cv2.MORPH_CLOSE, kernel)
+        
+        # 4. เพิ่มความคมชัด
+        kernel_sharp = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+        sharpened = cv2.filter2D(morph, -1, kernel_sharp)
+        
+        # แปลงกลับเป็น PIL Image
+        processed_image = Image.fromarray(sharpened)
+        
+        # 5. เพิ่ม contrast และ brightness ด้วย PIL
+        enhancer = ImageEnhance.Contrast(processed_image)
+        processed_image = enhancer.enhance(1.8)
+        
+        enhancer = ImageEnhance.Brightness(processed_image)
+        processed_image = enhancer.enhance(1.1)
+        
+        return processed_image
+        
+    except Exception as e:
+        st.warning(f"⚠️ ไม่สามารถประมวลผลรูปภาพขั้นสูงได้: {e}")
+        # Fallback เป็นการปรับปรุงพื้นฐาน
+        return enhance_image_basic(image)
 
-def enhance_image_for_ocr(image):
-    """ปรับปรุงคุณภาพรูปภาพสำหรับ OCR"""
-    # เพิ่ม contrast
+def enhance_image_basic(image):
+    """การปรับปรุงรูปภาพพื้นฐาน (Fallback)"""
     enhancer = ImageEnhance.Contrast(image)
     image = enhancer.enhance(2.0)
     
-    # เพิ่ม sharpness
     enhancer = ImageEnhance.Sharpness(image)
     image = enhancer.enhance(1.5)
     
-    # เพิ่ม brightness เล็กน้อย
     enhancer = ImageEnhance.Brightness(image)
     image = enhancer.enhance(1.1)
     
@@ -36,7 +79,6 @@ def enhance_image_for_ocr(image):
 
 def extract_ocr_from_pdf(pdf_bytes):
     """แปลง PDF เป็น OCR Text และคืนค่าทั้ง text และ images"""
-    
     temp_file = "temp_upload.pdf"
     try:
         # บันทึกไฟล์ชั่วคราว
@@ -45,28 +87,67 @@ def extract_ocr_from_pdf(pdf_bytes):
         
         st.info("🔄 กำลังแปลง PDF เป็นรูปภาพ...")
         
-        # แปลง PDF เป็นรูปภาพ (Poppler จะถูกหา Path ได้อัตโนมัติจาก packages.txt)
-        pages = convert_from_path(temp_file, dpi=400)
+        # แปลง PDF เป็นรูปภาพด้วยความละเอียดสูง
+        pages = convert_from_path(temp_file, dpi=450, fmt='PNG')
         
         ocr_results = []
         
         for i, page in enumerate(pages):
             st.info(f"📖 กำลังทำ OCR หน้าที่ {i+1}/{len(pages)}...")
             
-            # ปรับปรุงคุณภาพรูปภาพ
-            enhanced_page = enhance_image_for_ocr(page)
+            # ใช้การประมวลผลรูปภาพขั้นสูง
+            enhanced_page = advanced_image_preprocessing(page)
             
-            # ทำ OCR
-            ocr_text = pytesseract.image_to_string(
-                enhanced_page,
-                lang="tha+eng",
-                config='--psm 6 --oem 3'
-            )
+            # ลอง OCR หลายแบบเพื่อเพิ่มความแม่นยำ
+            ocr_configs = [
+                '--psm 6 --oem 3',  # Uniform text block
+                '--psm 4 --oem 3',  # Single column text
+                '--psm 8 --oem 3',  # Single word
+                '--psm 13 --oem 3'  # Raw line. Treat the image as a single text line
+            ]
+            
+            best_text = ""
+            best_confidence = 0
+            
+            for config in ocr_configs:
+                try:
+                    # ทำ OCR ด้วย config นี้
+                    ocr_data = pytesseract.image_to_data(
+                        enhanced_page,
+                        lang="tha+eng",
+                        config=config,
+                        output_type=pytesseract.Output.DICT
+                    )
+                    
+                    # คำนวณ confidence เฉลี่ย
+                    confidences = [int(conf) for conf in ocr_data['conf'] if int(conf) > 0]
+                    avg_confidence = sum(confidences) / len(confidences) if confidences else 0
+                    
+                    # เลือก result ที่มี confidence สูงสุด
+                    if avg_confidence > best_confidence:
+                        best_confidence = avg_confidence
+                        best_text = pytesseract.image_to_string(
+                            enhanced_page,
+                            lang="tha+eng",
+                            config=config
+                        )
+                        
+                except Exception as e:
+                    continue
+            
+            # ถ้าไม่มี result ที่ดี ให้ใช้การ OCR พื้นฐาน
+            if not best_text.strip():
+                best_text = pytesseract.image_to_string(
+                    enhanced_page,
+                    lang="tha+eng",
+                    config='--psm 6 --oem 3'
+                )
             
             ocr_results.append({
                 'page_number': i + 1,
-                'ocr_text': ocr_text,
-                'image': enhanced_page
+                'ocr_text': best_text,
+                'image': enhanced_page,
+                'confidence': best_confidence
             })
         
         # ลบไฟล์ชั่วคราว
@@ -81,68 +162,127 @@ def extract_ocr_from_pdf(pdf_bytes):
         return []
 
 def clean_amount(raw_amount):
-    """ทำความสะอาดตัวเลขที่ดึงมา (ลบคอมมาและแปลงเป็นทศนิยมสองหลัก)"""
+    """ทำความสะอาดตัวเลขที่ดึงมา"""
     if not raw_amount:
         return ""
-    # ลบเครื่องหมายที่ไม่ใช่ตัวเลขหรือจุดทศนิยม
+    
+    # ลบเครื่องหมายและอักขระพิเศษ
     cleaned = re.sub(r'[^\d\.]', '', raw_amount.replace(',', ''))
+    
     try:
-        # ตรวจสอบว่าเป็นตัวเลขจริงหรือไม่
-        return f"{float(cleaned):.2f}"
-    except ValueError:
+        # ตรวจสอบว่าเป็นตัวเลขที่สมเหตุสมผล
+        float_val = float(cleaned)
+        if 1 <= float_val <= 999999999:  # ช่วงที่เหมาะสม
+            return f"{float_val:.2f}"
+        return ""
+    except (ValueError, TypeError):
         return ""
 
-
 def extract_data_from_ocr_text(text):
-    """ดึงข้อมูลจากข้อความ OCR"""
+    """ดึงข้อมูลจากข้อความ OCR ด้วยความแม่นยำสูง"""
     data = {
         'date': '',
         'invoice_number': '',
         'amount': '',
-        'raw_matches': {}
+        'raw_matches': {},
+        'debug_info': {}
     }
     
-    # --- 1. การดึงเลขที่ HH (แข็งแกร่งที่สุด) ---
-    # ค้นหาคำว่า 'เลขที' หรือ 'No' แล้วตามด้วย HHxxxxxx โดยยอมให้มีอักขระที่ไม่ใช่ตัวอักษรคั่น
-    invoice_pattern = r'(?:เลขที|No)[.,:\s\n\r]*\s*([H]\w{6,8})'
-    invoice_matches = re.search(invoice_pattern, text, re.IGNORECASE)
-    if not invoice_matches:
-        # Fallback: หา HHxxxxxx ที่ไหนก็ได้
-        invoice_pattern = r'(HH\d{6,8})'
-        invoice_matches = re.search(invoice_pattern, text)
-
-    if invoice_matches:
-        data['invoice_number'] = invoice_matches.group(1)
-        data['raw_matches']['invoices_found'] = [data['invoice_number']]
+    # ทำความสะอาดข้อความก่อน
+    clean_text = re.sub(r'\s+', ' ', text.strip())
     
-    # --- 2. การดึงวันที่ (แข็งแกร่งกว่าเดิม) ---
-    # ค้นหา วันที่ หรือ Date แล้วตามด้วย DD/MM/YY
-    date_pattern = r'(?:วันที|Date)\s*[.,:\s\n\r]*(\d{1,2}/\d{1,2}/\d{2,4})'
-    date_matches = re.search(date_pattern, text, re.IGNORECASE)
-    if date_matches:
-        data['date'] = date_matches.group(1)
-        data['raw_matches']['dates_found'] = [data['date']]
+    # === 1. ดึงเลขที่เอกสาร (HH Pattern) ===
+    invoice_patterns = [
+        r'(?:เลขที[่ิ]*|No\.?|Invoice\s*No\.?)[:\s]*([HH]{1,2}\d{6,8})',  # มี label นำหน้า
+        r'\b(HH\d{6,8})\b',  # HH ตามด้วยตัวเลข 6-8 หลัก
+        r'([H]{2}\d{6,8})',  # HH แล้วตามด้วยตัวเลข
+        r'(HH[\s]*\d{6,8})',  # HH อาจมีช่องว่างคั่น
+    ]
     
-    # --- 3. การดึงยอดก่อน VAT (มูลค่าสินค้า) - เน้นตำแหน่งที่แน่นอน ---
+    for pattern in invoice_patterns:
+        matches = re.findall(pattern, clean_text, re.IGNORECASE)
+        if matches:
+            # เลือกเลขที่ยาวที่สุดและสมเหตุสมผล
+            valid_invoices = [m for m in matches if len(re.sub(r'[^A-Z0-9]', '', m)) >= 8]
+            if valid_invoices:
+                data['invoice_number'] = valid_invoices[0].replace(' ', '')
+                data['raw_matches']['invoices_found'] = matches
+                break
     
-    # 3.1 Deep Fallback (หลัก): ดึงตัวเลขที่อยู่ระหว่าง 'หักส่วนลด' และ 'จำนวนภาษีมูลค่าเพิ่ม'
-    # ใช้นี่เพราะมูลค่าสินค้ามักจะเป็นตัวเลขที่อยู่ระหว่าง Discount กับ VAT
-    deep_fallback_pattern = r"(?:หักส่วนลด|Less Discount)(?:.|\n)*?([,\d]+\.\d{2})\s*(?:จำนวนภาษีมูลค่าเพิ่ม|7.00 %)"
-
-    # 3.2 Fuzzy Regex (สำรอง): ค้นหาคำนำหน้า 'มูลค่าสินค้า'
-    fuzzy_pattern = r"(?:[มม]*ูลค่าสินค้า|Product\s*Value)\s*[.,:\s\n\r]*\s*([,\d]+\.\d{2})"
+    # === 2. ดึงวันที่ (Date Pattern) ===
+    date_patterns = [
+        r'(?:วันที[่ิ]*|Date)[:\s]*(\d{1,2}/\d{1,2}/\d{2,4})',  # มี label
+        r'\b(\d{1,2}/\d{1,2}/\d{2})\b',  # รูปแบบ DD/MM/YY
+        r'(\d{2}/\d{2}/\d{2})',  # รูปแบบ DD/MM/YY แน่นอน
+        r'(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',  # รองรับทั้ง / และ -
+    ]
     
-    amount_match = re.search(deep_fallback_pattern, text, re.IGNORECASE | re.DOTALL)
-    
-    # ถ้าหาแบบ Deep Fallback ไม่เจอ ให้ลองหาแบบ Fuzzy
-    if not amount_match:
-        amount_match = re.search(fuzzy_pattern, text, re.IGNORECASE | re.DOTALL)
-
-    if amount_match:
-        raw_amount = amount_match.group(1)
-        data['amount'] = clean_amount(raw_amount)
+    for pattern in date_patterns:
+        matches = re.findall(pattern, clean_text, re.IGNORECASE)
+        if matches:
+            # เลือกวันที่ที่มีรูปแบบถูกต้อง
+            valid_dates = []
+            for date_str in matches:
+                if re.match(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$', date_str):
+                    # แปลง - เป็น /
+                    normalized_date = date_str.replace('-', '/')
+                    valid_dates.append(normalized_date)
             
-    data['raw_matches']['amounts_found'] = [data['amount']]
+            if valid_dates:
+                data['date'] = valid_dates[0]
+                data['raw_matches']['dates_found'] = matches
+                break
+    
+    # === 3. ดึงยอดเงิน (Amount Pattern) - ขั้นสูงขึ้น ===
+    amount_patterns = [
+        # Pattern 1: หาจากคำว่า "มูลค่าสินค้า" หรือ "Product Value"
+        r'(?:มูลค[่า]*สินค[้า]*|Product\s*Value)[:\s]*([,\d]+\.?\d{0,2})',
+        
+        # Pattern 2: หาตัวเลขที่อยู่ในบรรทัดที่มีคำว่า "มูลค่า"
+        r'มูลค[่า]*[^0-9\n]*([,\d]+\.\d{2})',
+        
+        # Pattern 3: หาตัวเลขที่อยู่ก่อน "จำนวนภาษี" หรือ "VAT"
+        r'([,\d]+\.\d{2})\s*(?:จำนวนภาษี|VAT|7\.00\s*%)',
+        
+        # Pattern 4: หาตัวเลขที่อยู่หลัง "หักส่วนลด" และก่อน "VAT"
+        r'(?:หักส่วนลด|Discount)[\s\S]*?([,\d]+\.\d{2})[\s\S]*?(?:VAT|ภาษี)',
+        
+        # Pattern 5: หาตัวเลขทศนิยม 2 ตำแหน่งที่มีขนาดเหมาะสม
+        r'\b([,\d]{4,}\.\d{2})\b',
+        
+        # Pattern 6: หาในบริบท subtotal หรือ net amount
+        r'(?:รวม|Total|Net|Sub)[^0-9]*([,\d]+\.\d{2})',
+    ]
+    
+    found_amounts = []
+    
+    for i, pattern in enumerate(amount_patterns):
+        matches = re.findall(pattern, clean_text, re.IGNORECASE | re.DOTALL)
+        for match in matches:
+            cleaned_amount = clean_amount(match)
+            if cleaned_amount:
+                # เก็บข้อมูลเพิ่มเติมว่าได้มาจาก pattern ไหน
+                found_amounts.append({
+                    'amount': cleaned_amount,
+                    'raw': match,
+                    'pattern': i + 1,
+                    'numeric_value': float(cleaned_amount)
+                })
+    
+    # เลือกยอดเงินที่เหมาะสมที่สุด
+    if found_amounts:
+        # เรียงตาม pattern priority และความเหมาะสมของตัวเลข
+        found_amounts.sort(key=lambda x: (x['pattern'], -x['numeric_value']))
+        
+        # เลือกจากที่มี pattern ดีที่สุด หรือตัวเลขที่สมเหตุสมผล
+        best_amount = found_amounts[0]
+        
+        # ตรวจสอบความสมเหตุสมผลเพิ่มเติม
+        if 100 <= best_amount['numeric_value'] <= 100000:  # ช่วงที่เหมาะสมสำหรับใบเสร็จ
+            data['amount'] = best_amount['amount']
+        
+        data['raw_matches']['amounts_found'] = [amt['raw'] for amt in found_amounts[:5]]  # เก็บ 5 อันแรก
+        data['debug_info']['amount_details'] = found_amounts[:3]  # เก็บรายละเอียดเพื่อ debug
     
     return data
 
@@ -174,7 +314,7 @@ def fill_excel_with_data(data_list):
     # แปลงเป็น Excel
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # เลือกเฉพาะคอลัมน์ที่ต้องการ (วันที่, เลขที่ตามบิล, ยอดก่อน VAT)
+        # เลือกเฉพาะคอลัมน์ที่ต้องการ
         df_to_excel = df_data[['date', 'invoice_number', 'amount']].copy()
         df_to_excel.insert(0, 'ลำดับ', df_to_excel.index + 1)
         
@@ -188,13 +328,13 @@ def fill_excel_with_data(data_list):
 
 def main():
     st.set_page_config(
-        page_title="PDF OCR Extractor",
+        page_title="Enhanced PDF OCR Extractor",
         layout="wide",
         initial_sidebar_state="expanded"
     )
     
-    st.title("🔍 PDF OCR Checker & Excel Data Filler")
-    st.markdown("**(สำหรับใบเสร็จ บริษัท ธนารัตน์ปิยะปิโตรเลียม จำกัด)**")
+    st.title("🔍 Enhanced PDF OCR Extractor - High Accuracy")
+    st.markdown("**ปรับปรุงความแม่นยำสำหรับใบเสร็จภาษาไทย**")
     st.markdown("---")
     
     # Initialize session state
@@ -205,101 +345,128 @@ def main():
     
     # Sidebar
     with st.sidebar:
-        st.header("⚙️ สรุปขั้นตอน")
+        st.header("⚙️ ขั้นตอนการทำงาน")
         st.markdown("""
         1. 📁 **อัปโหลด PDF**
-        2. 🚀 **กด 'เริ่ม OCR'**
-        3. ✏️ **ตรวจสอบ/แก้ไข (สำคัญ!)**
+        2. 🚀 **กด 'เริ่ม OCR ขั้นสูง'**
+        3. ✏️ **ตรวจสอบ/แก้ไข**
         4. 💾 **ดาวน์โหลด Excel**
         """)
         
         st.markdown("---")
-        st.markdown("### 🎯 ข้อมูลที่ต้องการ:")
+        st.markdown("### 🎯 การปรับปรุงใหม่:")
         st.markdown("""
-        - **วันที่** (กรอกในช่อง 'วันที่')
-        - **เลขที่ตามบิล** (กรอกในช่อง 'เลขที่ตามบิล')
-        - **มูลค่าสินค้า** (กรอกในช่อง 'ยอดก่อน VAT')
+        ✅ **Image Processing ขั้นสูง**
+        - Adaptive Threshold
+        - Morphological Operations  
+        - Noise Reduction
+        - Contrast Enhancement
+        
+        ✅ **Multi-Pattern Recognition**
+        - หลาย OCR Config
+        - Confidence Scoring
+        - Pattern Priority
+        """)
+        
+        st.markdown("### 📊 เป้าหมายข้อมูล:")
+        st.markdown("""
+        - **วันที่:** DD/MM/YY
+        - **เลขที่:** HHxxxxxxx
+        - **มูลค่า:** xxxx.xx
         """)
     
-    # --- Step 1 & 2: Upload and Convert ---
+    # === Step 1: Upload PDF ===
     st.header("1. 📁 อัปโหลดไฟล์ PDF")
     uploaded_file = st.file_uploader(
         "เลือกไฟล์ PDF",
         type="pdf",
-        help="อัปโหลดไฟล์ใบเสร็จ PDF ที่รวมหลายหน้าได้"
+        help="อัปโหลดไฟล์ใบเสร็จ PDF (รองรับหลายหน้า)"
     )
     
     if uploaded_file is not None:
-        st.success(f"✅ อัปโหลดไฟล์: {uploaded_file.name}")
-        
-        col1, col2 = st.columns([1, 4])
+        col1, col2 = st.columns([2, 3])
         with col1:
-            if st.button("🚀 เริ่มแปลง OCR", type="primary"):
-                with st.spinner("⏳ กำลังประมวลผล PDF และทำ OCR..."):
+            st.success(f"✅ ไฟล์: {uploaded_file.name}")
+            file_size = len(uploaded_file.getvalue()) / (1024 * 1024)
+            st.info(f"📊 ขนาด: {file_size:.1f} MB")
+        
+        with col2:
+            if st.button("🚀 เริ่มแปลง OCR ขั้นสูง", type="primary", use_container_width=True):
+                with st.spinner("⚡ กำลังประมวลผล PDF ด้วย AI OCR..."):
                     pdf_bytes = uploaded_file.getvalue()
                     st.session_state.ocr_results = extract_ocr_from_pdf(pdf_bytes)
         
+        # === Step 2: Display OCR Results ===
         if st.session_state.ocr_results:
-            st.success(f"✅ แปลง OCR เสร็จสิ้น! พบ {len(st.session_state.ocr_results)} หน้า")
+            st.success(f"✅ OCR เสร็จสิ้น! ประมวลผล {len(st.session_state.ocr_results)} หน้า")
             
-            # --- Step 3: Display and Edit Results ---
-            st.header("2. 👁️ ตรวจสอบและแก้ไขข้อมูล (จำเป็น)")
-            st.warning("⚠️ โปรดตรวจสอบข้อมูลที่ดึงมาโดย OCR ในช่องสีเหลือง แล้วกด 'บันทึก' ทุกหน้า")
+            # แสดงสถิติ confidence
+            avg_confidence = sum([r.get('confidence', 0) for r in st.session_state.ocr_results]) / len(st.session_state.ocr_results)
+            st.info(f"📊 ความแม่นยำเฉลี่ย: {avg_confidence:.1f}%")
             
-            # Loop เพื่อแสดงผลลัพธ์แต่ละหน้า
+            st.header("2. 👁️ ตรวจสอบและแก้ไขข้อมูล")
+            st.warning("⚠️ โปรดตรวจสอบข้อมูลในแต่ละหน้าและกด 'บันทึก'")
+            
+            # === แสดงผลลัพธ์แต่ละหน้า ===
             for result in st.session_state.ocr_results:
                 page_key = result['page_number']
+                confidence = result.get('confidence', 0)
                 
-                # ดึงข้อมูลจาก OCR (ทุกครั้งที่หน้าถูกสร้าง)
+                # ดึงข้อมูลจาก OCR
                 extracted = extract_data_from_ocr_text(result['ocr_text'])
                 
-                # ค้นหาค่าที่บันทึกไว้แล้ว (ถ้ามี)
+                # ค้นหาข้อมูลที่บันทึกไว้แล้ว
                 saved_data = next((d for d in st.session_state.extracted_data if d['page_number'] == page_key), None)
                 
-                with st.expander(f"📄 ใบเสร็จหน้าที่ {page_key}", expanded=False):
-                    
-                    st.markdown(f"**สถานะ:** {'💾 บันทึกแล้ว' if saved_data else '✏️ รอการบันทึก/แก้ไข'}")
+                # กำหนดสีของ expander ตามสถานะ
+                status_icon = "💾 บันทึกแล้ว" if saved_data else "✏️ รอการตรวจสอบ"
+                confidence_badge = f"🎯 {confidence:.1f}%" if confidence > 0 else ""
+                
+                with st.expander(f"📄 หน้าที่ {page_key} | {status_icon} | {confidence_badge}", expanded=not saved_data):
                     
                     col1, col2 = st.columns([1, 1])
                     
                     with col1:
-                        st.subheader("📝 ข้อมูลที่ดึงได้:")
+                        st.subheader("📝 ข้อมูลที่ตรวจพบ:")
                         
-                        # ใช้ค่าที่บันทึกไว้ (ถ้ามี) หรือใช้ค่าจาก OCR ใหม่
+                        # ใช้ค่าที่บันทึกไว้หรือค่าจาก OCR ใหม่
                         initial_date = saved_data['date'] if saved_data else extracted['date']
                         initial_invoice = saved_data['invoice_number'] if saved_data else extracted['invoice_number']
                         initial_amount = saved_data['amount'] if saved_data else extracted['amount']
                         
-                        # --- Input Fields for User Correction ---
+                        # === Input Fields ===
                         date_value = st.text_input(
                             "📅 วันที่:",
                             value=initial_date,
+                            help="รูปแบบ: DD/MM/YY เช่น 01/08/68",
                             key=f"date_{page_key}"
                         )
                         
                         invoice_value = st.text_input(
                             "🔢 เลขที่ตามบิล:",
                             value=initial_invoice,
+                            help="รูปแบบ: HHxxxxxxx เช่น HH6800470",
                             key=f"invoice_{page_key}"
                         )
                         
                         amount_value = st.text_input(
                             "💰 ยอดก่อน VAT:",
                             value=initial_amount,
+                            help="รูปแบบ: xxxx.xx เช่น 4710.28",
                             key=f"amount_{page_key}"
                         )
                         
-                        # ปุ่มบันทึกข้อมูล
-                        if st.button(f"💾 บันทึก/อัปเดตข้อมูลหน้า {page_key}", key=f"save_{page_key}", type="primary", use_container_width=True):
+                        # === Save Button ===
+                        if st.button(f"💾 บันทึกข้อมูลหน้า {page_key}", key=f"save_{page_key}", type="primary", use_container_width=True):
                             
-                            # ตรวจสอบว่ามีข้อมูลหน้านี้อยู่แล้วหรือไม่
+                            # ตรวจสอบและอัปเดตข้อมูล
                             existing_index = next((i for i, data in enumerate(st.session_state.extracted_data) if data['page_number'] == page_key), None)
                             
                             page_data = {
                                 'page_number': page_key,
-                                'date': date_value,
-                                'invoice_number': invoice_value,
-                                'amount': amount_value
+                                'date': date_value.strip(),
+                                'invoice_number': invoice_value.strip(),
+                                'amount': amount_value.strip()
                             }
                             
                             if existing_index is not None:
@@ -307,41 +474,64 @@ def main():
                             else:
                                 st.session_state.extracted_data.append(page_data)
                             
-                            # บังคับให้ Streamlit รันซ้ำเพื่ออัปเดตสถานะ
-                            st.rerun() 
+                            st.success(f"✅ บันทึกข้อมูลหน้า {page_key} เรียบร้อย!")
+                            st.rerun()
                     
                     with col2:
-                        st.subheader("🖼️ รูปภาพ OCR & Text (ต้นฉบับ):")
+                        st.subheader("🖼️ รูปภาพที่ปรับปรุงแล้ว:")
                         st.image(result['image'], use_container_width=True)
                         
-                        with st.expander("📝 ข้อความ OCR ดิบ (Raw Text)"):
-                             st.text_area(
-                                "OCR Text:",
-                                result['ocr_text'],
-                                height=250,
-                                key=f"ocr_text_{page_key}"
+                        # === Debug Information ===
+                        with st.expander("🔍 ข้อมูล Debug & OCR Text"):
+                            st.text_area(
+                                "OCR Raw Text:",
+                                result['ocr_text'][:1000] + "..." if len(result['ocr_text']) > 1000 else result['ocr_text'],
+                                height=200,
+                                key=f"ocr_debug_{page_key}"
                             )
+                            
+                            if extracted['debug_info']:
+                                st.json(extracted['debug_info'])
+                            
+                            if extracted['raw_matches']:
+                                st.write("**ข้อมูลทั้งหมดที่พบ:**")
+                                st.json(extracted['raw_matches'])
             
-            # --- Step 4: Create Excel ---
+            # === Step 3: Create Excel ===
             if st.session_state.extracted_data:
-                st.header("3. 💾 ดาวน์โหลดไฟล์ Excel")
+                st.header("3. 💾 สร้างและดาวน์โหลด Excel")
                 
-                # แสดงสรุปข้อมูลที่จะกรอกลง Excel
+                # แสดงสรุปข้อมูล
                 df_summary = pd.DataFrame(st.session_state.extracted_data)
                 df_summary = df_summary.sort_values(by='page_number').reset_index(drop=True)
+                df_display = df_summary[['page_number', 'date', 'invoice_number', 'amount']].copy()
+                df_display.columns = ['หน้า', 'วันที่', 'เลขที่ตามบิล', 'ยอดก่อน VAT']
                 
-                st.subheader("📋 สรุปข้อมูลที่ถูกบันทึกแล้ว:")
-                st.dataframe(df_summary, use_container_width=True, height=300)
+                st.subheader("📋 สรุปข้อมูลสุดท้าย:")
+                st.dataframe(df_display, use_container_width=True, height=300)
                 
-                st.info(f"📊 พร้อมสร้างไฟล์ Excel ด้วยข้อมูล {len(st.session_state.extracted_data)} รายการ")
+                # สถิติ
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("จำนวนหน้าที่บันทึก", len(df_summary))
+                with col2:
+                    valid_amounts = len([d for d in st.session_state.extracted_data if d['amount']])
+                    st.metric("หน้าที่มียอดเงิน", valid_amounts)
+                with col3:
+                    try:
+                        total_amount = sum([float(d['amount']) for d in st.session_state.extracted_data if d['amount']])
+                        st.metric("ยอดรวมทั้งหมด", f"{total_amount:,.2f}")
+                    except:
+                        st.metric("ยอดรวมทั้งหมด", "ไม่สามารถคำนวณได้")
                 
-                # ปุ่มดาวน์โหลด Excel
+                # === Download Button ===
+                st.markdown("---")
                 excel_file = fill_excel_with_data(st.session_state.extracted_data)
                 
                 st.download_button(
-                    label="⬇️ ดาวน์โหลด Excel (Final File)",
+                    label="⬇️ ดาวน์โหลดไฟล์ Excel (Final)",
                     data=excel_file,
-                    file_name=f"Invoice_Data_{uploaded_file.name.replace('.pdf', '')}.xlsx",
+                    file_name=f"Enhanced_Invoice_Data_{uploaded_file.name.replace('.pdf', '')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     type="primary",
                     use_container_width=True
@@ -352,14 +542,24 @@ def main():
         
         # แสดง Template Excel สำหรับดาวน์โหลด
         st.header("📋 หรือดาวน์โหลด Excel Template")
-        template_file = create_excel_template()
         
-        st.download_button(
-            label="⬇️ ดาวน์โหลด Excel Template",
-            data=template_file,
-            file_name="Invoice_Template.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.markdown("""
+            **คุณสามารถ:**
+            - ดาวน์โหลด Template Excel เปล่า
+            - อัปโหลด PDF แล้วให้ AI ดึงข้อมูลอัตโนมัติ
+            - ตรวจสอบและแก้ไขข้อมูลก่อนดาวน์โหลด
+            """)
+        
+        with col2:
+            template_file = create_excel_template()
+            st.download_button(
+                label="⬇️ ดาวน์โหลด Template",
+                data=template_file,
+                file_name="Invoice_Template.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 if __name__ == "__main__":
     main()
