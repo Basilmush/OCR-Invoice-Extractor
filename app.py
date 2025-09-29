@@ -19,6 +19,9 @@ def process_pdf_data(pdf_bytes):
     """
     ประมวลผลไฟล์ PDF, ดึงข้อมูลตามโครงสร้างที่ต้องการ, และส่งคืน DataFrame
     """
+    # **แก้ไข UnboundLocalError: กำหนดค่าเริ่มต้นของตัวแปรสถานะ**
+    status_placeholder = st.empty()
+    
     try:
         # 1. เขียนไฟล์ PDF ชั่วคราวเพื่อให้ pdf2image ทำงานได้
         with open("temp_upload.pdf", "wb") as f:
@@ -31,8 +34,8 @@ def process_pdf_data(pdf_bytes):
 
         data = []
         
+        # ย้าย status_placeholder ขึ้นไปกำหนดค่าเริ่มต้นแล้ว
         # เตรียมที่เก็บข้อความสถานะ
-        status_placeholder = st.empty()
 
         for i, page in enumerate(pages):
             status_placeholder.info(f"กำลังประมวลผลหน้าที่ {i+1}/{len(pages)}...")
@@ -44,6 +47,7 @@ def process_pdf_data(pdf_bytes):
             # 4. ใช้ regex ดึงข้อมูล
             date_pattern = r"(\d{2}/\d{2}/\d{2})"
             no_pattern = r"HH\d{6,}"
+            # ปรับ regex ให้ยืดหยุ่นขึ้นในการจับกลุ่มมูลค่าสินค้า
             amount_pattern = r"(มูลค่าสินค้า\s*Product Value[,\s]*\n?)([,\d]+\.\d{2})"
             
             date_match = re.search(date_pattern, text)
