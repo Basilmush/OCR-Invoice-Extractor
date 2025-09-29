@@ -89,12 +89,12 @@ def extract_data_from_ocr_text(text):
         'raw_matches': {}
     }
     
-    # --- 1. การดึงเลขที่ HH (แข็งแกร่งกว่าเดิม) ---
-    # ค้นหา HHxxxxxx ในบรรทัดแรกๆ ของเอกสาร
-    invoice_pattern = r'เลขที\s*(?:No\.)?\s*([H]\w{6,8})'
+    # --- 1. การดึงเลขที่ HH (แข็งแกร่งที่สุด) ---
+    # ค้นหาคำว่า 'เลขที' หรือ 'No' แล้วตามด้วย HHxxxxxx โดยยอมให้มีอักขระที่ไม่ใช่ตัวอักษรคั่น
+    invoice_pattern = r'(?:เลขที|No)[.,:\s\n\r]*\s*([H]\w{6,8})'
     invoice_matches = re.search(invoice_pattern, text, re.IGNORECASE)
     if not invoice_matches:
-        # Fallback 1: หา HHxxxxxx ที่ไหนก็ได้
+        # Fallback: หา HHxxxxxx ที่ไหนก็ได้
         invoice_pattern = r'(HH\d{6,8})'
         invoice_matches = re.search(invoice_pattern, text)
 
@@ -104,7 +104,7 @@ def extract_data_from_ocr_text(text):
     
     # --- 2. การดึงวันที่ (แข็งแกร่งกว่าเดิม) ---
     # ค้นหา วันที่ หรือ Date แล้วตามด้วย DD/MM/YY
-    date_pattern = r'(?:วันที|Date)\s*(\d{1,2}/\d{1,2}/\d{2,4})'
+    date_pattern = r'(?:วันที|Date)\s*[.,:\s\n\r]*(\d{1,2}/\d{1,2}/\d{2,4})'
     date_matches = re.search(date_pattern, text, re.IGNORECASE)
     if date_matches:
         data['date'] = date_matches.group(1)
@@ -112,12 +112,11 @@ def extract_data_from_ocr_text(text):
     
     # --- 3. การดึงยอดก่อน VAT (มูลค่าสินค้า) - เน้นตำแหน่งที่แน่นอน ---
     
-    # Regex ขั้นสูงสุด: ใช้การค้นหาแบบยืดหยุ่นสำหรับคำนำหน้าและดึงตัวเลขที่ตามมา
-    # ค้นหาคำที่ขึ้นต้นด้วย มูลค่าสินค้า หรือ Product Value โดยยอมให้มีตัวอักษรผิดเพี้ยน [มม]*
+    # Regex ขั้นสูงสุด: ใช้การค้นหาแบบยืดหยุ่นสำหรับคำนำหน้า
     amount_pattern_fuzzy = r"(?:[มม]*ูลค่าสินค้า|Product\s*Value)\s*[.,:\s\n\r]*\s*([,\d]+\.\d{2})"
     
-    # Regex สำรอง (Fallback): ค้นหาตัวเลขที่อยู่หลัง 'หักส่วนลด' และก่อน 'จำนวนภาษีมูลค่าเพิ่ม'
-    # ใช้ re.DOTALL เพื่อให้ '.' รวมการขึ้นบรรทัดใหม่ด้วย
+    # Regex สำรอง (Deep Fallback): ดึงตัวเลขที่อยู่ระหว่าง 'หักส่วนลด' และ 'จำนวนภาษีมูลค่าเพิ่ม'
+    # ใช้นี่เพราะมูลค่าสินค้ามักจะเป็นตัวเลขที่อยู่ระหว่าง Discount กับ VAT
     amount_pattern_deep_fallback = r"(?:หักส่วนลด|Less Discount)(?:.|\n)*?([,\d]+\.\d{2})\s*(?:จำนวนภาษีมูลค่าเพิ่ม|7.00 %)"
 
     
