@@ -8,6 +8,18 @@ from PIL import Image, ImageEnhance
 import os
 import io
 
+# =========================================================
+# การตั้งค่า Tesseract Path สำหรับ Cloud Server (แก้ไข)
+# ย้ายการกำหนด Path ออกมาด้านนอกฟังก์ชันเพื่อให้มั่นใจว่าถูกตั้งค่าก่อนใช้งาน
+# =========================================================
+try:
+    # กำหนด Tesseract Path สำหรับ Linux/Cloud Server
+    pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+except Exception:
+    # กรณีที่ Tesseract ไม่ได้ถูกติดตั้งในตำแหน่งมาตรฐาน (สำรองสำหรับ Local Windows)
+    pass
+
+
 def enhance_image_for_ocr(image):
     """ปรับปรุงคุณภาพรูปภาพสำหรับ OCR"""
     # เพิ่ม contrast
@@ -26,8 +38,6 @@ def enhance_image_for_ocr(image):
 
 def extract_ocr_from_pdf(pdf_bytes):
     """แปลง PDF เป็น OCR Text และคืนค่าทั้ง text และ images"""
-    # กำหนด Tesseract Path สำหรับ Linux/Cloud Server
-    pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
     
     temp_file = "temp_upload.pdf"
     try:
@@ -37,8 +47,7 @@ def extract_ocr_from_pdf(pdf_bytes):
         
         st.info("🔄 กำลังแปลง PDF เป็นรูปภาพ...")
         
-        # แปลง PDF เป็นรูปภาพ
-        # Note: บน Cloud ไม่ต้องระบุ poppler_path
+        # แปลง PDF เป็นรูปภาพ (Poppler จะถูกหา Path ได้อัตโนมัติจาก packages.txt)
         pages = convert_from_path(temp_file, dpi=400)
         
         ocr_results = []
@@ -53,7 +62,6 @@ def extract_ocr_from_pdf(pdf_bytes):
             ocr_text = pytesseract.image_to_string(
                 enhanced_page,
                 lang="tha+eng",
-                # ใช้ config ที่เหมาะสมสำหรับเอกสารที่เป็นตาราง/ฟอร์ม (PSM 6)
                 config='--psm 6 --oem 3'
             )
             
