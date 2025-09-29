@@ -4,9 +4,7 @@ import re
 import pytesseract
 from pdf2image import convert_from_path
 from openpyxl import Workbook, load_workbook
-from PIL import Image, ImageEnhance, ImageFilter
-import cv2
-import numpy as np
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 import os
 import io
 
@@ -20,44 +18,41 @@ except Exception:
     pass
 
 def advanced_image_preprocessing(image):
-    """ปรับปรุงรูปภาพสำหรับ OCR ด้วยเทคนิคขั้นสูง"""
+    """ปรับปรุงรูปภาพสำหรับ OCR ด้วย PIL เท่านั้น (ไม่ใช้ OpenCV)"""
     try:
-        # แปลงเป็น numpy array
-        img_array = np.array(image)
-        
         # แปลงเป็น grayscale
-        if len(img_array.shape) == 3:
-            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+        if image.mode != 'L':
+            gray_image = image.convert('L')
         else:
-            gray = img_array
+            gray_image = image
         
-        # 1. Gaussian Blur เพื่อลด noise
-        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        # 1. เพิ่ม contrast
+        enhancer = ImageEnhance.Contrast(gray_image)
+        contrast_image = enhancer.enhance(2.5)
         
-        # 2. Adaptive Threshold สำหรับข้อความที่มีความแตกต่างของแสง
-        adaptive_thresh = cv2.adaptiveThreshold(
-            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
-        )
+        # 2. เพิ่ม sharpness
+        enhancer = ImageEnhance.Sharpness(contrast_image)
+        sharp_image = enhancer.enhance(2.0)
         
-        # 3. Morphological operations เพื่อทำความสะอาดข้อความ
-        kernel = np.ones((2, 2), np.uint8)
-        morph = cv2.morphologyEx(adaptive_thresh, cv2.MORPH_CLOSE, kernel)
+        # 3. ปรับ brightness
+        enhancer = ImageEnhance.Brightness(sharp_image)
+        bright_image = enhancer.enhance(1.2)
         
-        # 4. เพิ่มความคมชัด
-        kernel_sharp = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-        sharpened = cv2.filter2D(morph, -1, kernel_sharp)
+        # 4. Apply filters
+        # Sharpen filter
+        sharpened = bright_image.filter(ImageFilter.SHARPEN)
         
-        # แปลงกลับเป็น PIL Image
-        processed_image = Image.fromarray(sharpened)
+        # Edge enhance
+        edge_enhanced = sharpened.filter(ImageFilter.EDGE_ENHANCE_MORE)
         
-        # 5. เพิ่ม contrast และ brightness ด้วย PIL
-        enhancer = ImageEnhance.Contrast(processed_image)
-        processed_image = enhancer.enhance(1.8)
+        # 5. Auto contrast
+        final_image = ImageOps.autocontrast(edge_enhanced, cutoff=2)
         
-        enhancer = ImageEnhance.Brightness(processed_image)
-        processed_image = enhancer.enhance(1.1)
+        # 6. เพิ่ม contrast อีกครั้ง
+        enhancer = ImageEnhance.Contrast(final_image)
+        final_processed = enhancer.enhance(1.3)
         
-        return processed_image
+        return final_processed
         
     except Exception as e:
         st.warning(f"⚠️ ไม่สามารถประมวลผลรูปภาพขั้นสูงได้: {e}")
@@ -356,16 +351,17 @@ def main():
         st.markdown("---")
         st.markdown("### 🎯 การปรับปรุงใหม่:")
         st.markdown("""
-        ✅ **Image Processing ขั้นสูง**
-        - Adaptive Threshold
-        - Morphological Operations  
-        - Noise Reduction
-        - Contrast Enhancement
+        ✅ **PIL Image Processing**
+        - Auto Contrast Enhancement
+        - Edge Detection & Sharpening
+        - Brightness & Contrast Optimization
+        - Multi-layer Filtering
         
         ✅ **Multi-Pattern Recognition**
         - หลาย OCR Config
         - Confidence Scoring
         - Pattern Priority
+        - Smart Validation
         """)
         
         st.markdown("### 📊 เป้าหมายข้อมูล:")
