@@ -9,14 +9,12 @@ import os
 import io
 
 # =========================================================
-# การตั้งค่า Tesseract Path สำหรับ Cloud Server (แก้ไข)
-# ย้ายการกำหนด Path ออกมาด้านนอกฟังก์ชันเพื่อให้มั่นใจว่าถูกตั้งค่าก่อนใช้งาน
+# การตั้งค่า Tesseract Path สำหรับ Cloud Server
 # =========================================================
 try:
     # กำหนด Tesseract Path สำหรับ Linux/Cloud Server
     pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 except Exception:
-    # กรณีที่ Tesseract ไม่ได้ถูกติดตั้งในตำแหน่งมาตรฐาน (สำรองสำหรับ Local Windows)
     pass
 
 
@@ -91,36 +89,43 @@ def extract_data_from_ocr_text(text):
         'raw_matches': {}
     }
     
-    # Pattern สำหรับวันที่ - รูปแบบ DD/MM/YY
-    date_pattern = r'(\d{1,2}/\d{1,2}/\d{2,4})'
-    date_matches = re.findall(date_pattern, text)
-    if date_matches:
-        # เลือกวันที่แรกที่พบ
-        data['date'] = date_matches[0]
-        data['raw_matches']['dates_found'] = date_matches
-    
-    # Pattern สำหรับเลข HH
-    invoice_pattern = r'(HH\d{6,8})'
-    invoice_matches = re.findall(invoice_pattern, text)
+    # --- 1. การดึงเลขที่ HH (แข็งแกร่งกว่าเดิม) ---
+    # ค้นหา HHxxxxxx ในบรรทัดแรกๆ ของเอกสาร
+    invoice_pattern = r'เลขที\s*(?:No\.)?\s*([H]\w{6,8})'
+    invoice_matches = re.search(invoice_pattern, text, re.IGNORECASE)
+    if not invoice_matches:
+        # Fallback 1: หา HHxxxxxx ที่ไหนก็ได้
+        invoice_pattern = r'(HH\d{6,8})'
+        invoice_matches = re.search(invoice_pattern, text)
+
     if invoice_matches:
-        # เลือกเลขที่บิลแรกที่พบ
-        data['invoice_number'] = invoice_matches[0]
-        data['raw_matches']['invoices_found'] = invoice_matches
+        data['invoice_number'] = invoice_matches.group(1)
+        data['raw_matches']['invoices_found'] = [data['invoice_number']]
     
-    # Pattern สำหรับมูลค่าสินค้า (ยอดก่อน VAT)
-    # 1. Regex ที่ปรับปรุง: ใช้การค้นหาแบบยืดหยุ่นสำหรับคำนำหน้าและจับตัวเลขที่อยู่ใกล้เคียง
-    #    ค้นหาคำที่ขึ้นต้นด้วย ม(ม)ูลค่าสินค้า หรือ Product Value โดยไม่สนตัวอักษรที่ขาดหายไป
+    # --- 2. การดึงวันที่ (แข็งแกร่งกว่าเดิม) ---
+    # ค้นหา วันที่ หรือ Date แล้วตามด้วย DD/MM/YY
+    date_pattern = r'(?:วันที|Date)\s*(\d{1,2}/\d{1,2}/\d{2,4})'
+    date_matches = re.search(date_pattern, text, re.IGNORECASE)
+    if date_matches:
+        data['date'] = date_matches.group(1)
+        data['raw_matches']['dates_found'] = [data['date']]
+    
+    # --- 3. การดึงยอดก่อน VAT (มูลค่าสินค้า) - เน้นตำแหน่งที่แน่นอน ---
+    
+    # Regex ขั้นสูงสุด: ใช้การค้นหาแบบยืดหยุ่นสำหรับคำนำหน้าและดึงตัวเลขที่ตามมา
+    # ค้นหาคำที่ขึ้นต้นด้วย มูลค่าสินค้า หรือ Product Value โดยยอมให้มีตัวอักษรผิดเพี้ยน [มม]*
     amount_pattern_fuzzy = r"(?:[มม]*ูลค่าสินค้า|Product\s*Value)\s*[.,:\s\n\r]*\s*([,\d]+\.\d{2})"
     
-    # 2. Regex สำรอง: ค้นหาตัวเลขที่มีรูปแบบ Gross Amount / Total Invoice
-    #    หากค่าแรกผิดพลาด ให้หาตัวเลขที่คล้ายกันในพื้นที่ใกล้เคียง
-    amount_pattern_fallback = r"(?:รวมเป็นเงิน|Total Invoice)\s*[\n\r]*\s*([,\d]+\.\d{2})"
+    # Regex สำรอง (Fallback): ค้นหาตัวเลขที่อยู่หลัง 'หักส่วนลด' และก่อน 'จำนวนภาษีมูลค่าเพิ่ม'
+    # ใช้ re.DOTALL เพื่อให้ '.' รวมการขึ้นบรรทัดใหม่ด้วย
+    amount_pattern_deep_fallback = r"(?:หักส่วนลด|Less Discount)(?:.|\n)*?([,\d]+\.\d{2})\s*(?:จำนวนภาษีมูลค่าเพิ่ม|7.00 %)"
+
     
     amount_match = re.search(amount_pattern_fuzzy, text, re.IGNORECASE)
     
-    # ถ้าหาแบบ Fuzzy ไม่เจอ ให้ลองหาแบบ Fallback (อาจได้ Total Invoice แทน)
+    # ถ้าหาแบบ Fuzzy ไม่เจอ ให้ลองหาแบบ Deep Fallback
     if not amount_match:
-        amount_match = re.search(amount_pattern_fallback, text, re.IGNORECASE)
+        amount_match = re.search(amount_pattern_deep_fallback, text, re.IGNORECASE | re.DOTALL)
 
     if amount_match:
         # group(1) คือตัวเลขที่ถูกจับกลุ่ม
