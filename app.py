@@ -111,8 +111,8 @@ st.markdown("""
         display: block;
         margin-left: auto;
         margin-right: auto;
-        width: 60%;
-        max-width: 800px;
+        width: 30%;
+        max-width: 400px;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -163,3 +163,4 @@ if uploaded_file:
         file_name="Invoice_Data.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
