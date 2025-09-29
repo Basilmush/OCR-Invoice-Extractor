@@ -7,11 +7,22 @@ from pdf2image import convert_from_bytes
 from PIL import Image, ImageEnhance
 import io
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
-def preprocess_image_for_ocr(pil_img):
+
+def preprocess_and_ocr(pil_img):
+    """ปรับภาพ + OCR แบบ optimized"""
+   
+    w, h = pil_img.size
+    max_width = 1800
+    if w > max_width:
+        ratio = max_width / w
+        pil_img = pil_img.resize((max_width, int(h*ratio)))
+
+  
     enhancer = ImageEnhance.Contrast(pil_img)
     pil_img = enhancer.enhance(2.0)
     enhancer = ImageEnhance.Sharpness(pil_img)
@@ -19,13 +30,15 @@ def preprocess_image_for_ocr(pil_img):
     enhancer = ImageEnhance.Brightness(pil_img)
     pil_img = enhancer.enhance(1.1)
 
-    img = np.array(pil_img.convert("RGB"))
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    thresh = cv2.adaptiveThreshold(gray, 255,
-                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+  
+    img = np.array(pil_img.convert("L"))
+    thresh = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                    cv2.THRESH_BINARY, 41, 15)
     denoised = cv2.medianBlur(thresh, 3)
-    return denoised
+
+   
+    text = pytesseract.image_to_string(denoised, lang="tha+eng", config="--psm 6 --oem 3")
+    return text
 
 def clean_amount(val):
     try:
@@ -37,6 +50,7 @@ def clean_amount(val):
         return ""
 
 def extract_fields(text):
+    """ดึงวันที่, เลขที่บิล, ยอดก่อน VAT"""
     data = {"date": "", "invoice_number": "", "amount": ""}
 
     date_patterns = [r"(\d{1,2}/\d{1,2}/\d{2,4})", r"(\d{1,2}-\d{1,2}-\d{2,4})"]
@@ -78,6 +92,7 @@ def fill_excel_with_data(data_list):
     return output
 
 
+st.set_page_config(page_title="OCR Invoice Tool", layout="wide")
 st.title("📄 OCR & Editable Invoice Viewer")
 st.write("อัปโหลด PDF / รูปภาพ → OCR → แก้ไขใต้ภาพ → ดาวน์โหลด Excel")
 
@@ -89,20 +104,23 @@ if uploaded_file:
 
     if not st.session_state.results:
         with st.spinner("กำลังประมวลผล OCR ..."):
+         
             if uploaded_file.type == "application/pdf":
-                pages = convert_from_bytes(uploaded_file.read(), dpi=400)
+                pages = convert_from_bytes(uploaded_file.read(), dpi=300)
             else:
                 pages = [Image.open(uploaded_file).convert("RGB")]
 
-            for i, page in enumerate(pages):
-                proc = preprocess_image_for_ocr(page)
-                text1 = pytesseract.image_to_string(proc, lang="tha+eng", config="--psm 6 --oem 3")
-                text2 = pytesseract.image_to_string(proc, lang="tha+eng", config="--psm 11 --oem 3")
-                text = text1 + "\n" + text2
+            def process_page(page, idx):
+                text = preprocess_and_ocr(page)
                 data = extract_fields(text)
-                data["page_number"] = i + 1
+                data["page_number"] = idx + 1
                 data["image"] = page
-                st.session_state.results.append(data)
+                return data
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = [executor.submit(process_page, p, i) for i, p in enumerate(pages)]
+                for f in futures:
+                    st.session_state.results.append(f.result())
 
     st.subheader("📋 แก้ไขข้อมูลแต่ละหน้า")
     edited_results = []
