@@ -9,21 +9,46 @@ import io
 import re
 import base64
 import time
-
-# ตั้งค่า Tesseract (ปรับ path ตามระบบของคุณ)
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'  # Windows example; Linux: /usr/bin/tesseract
+import shutil
+import os
 
 # ================================
-# Helper Functions
+# Tesseract Path Config (แก้ error)
+# ================================
+def get_tesseract_path():
+    # Auto-detect common paths
+    possible_paths = [
+        r'C:\Program Files\Tesseract-OCR\tesseract.exe',  # Windows default
+        '/usr/bin/tesseract',  # Linux
+        '/usr/local/bin/tesseract',  # Mac
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+# Streamlit input for path
+tess_path = st.text_input("Tesseract Path (ถ้า error, ใส่ path ที่ถูกต้อง)", value="", help="e.g., C:\\Program Files\\Tesseract-OCR\\tesseract.exe")
+if tess_path:
+    pytesseract.pytesseract.tesseract_cmd = tess_path
+else:
+    auto_path = get_tesseract_path()
+    if auto_path:
+        pytesseract.pytesseract.tesseract_cmd = auto_path
+        st.success(f"ใช้ path อัตโนมัติ: {auto_path}")
+    else:
+        st.error("Tesseract ไม่พบ! ติดตั้งตาม https://github.com/tesseract-ocr/tesseract แล้วใส่ path ด้านบน")
+        st.stop()
+
+# ================================
+# Helper Functions (same as before)
 # ================================
 def preprocess_for_ocr(pil_img):
-    """ปรับปรุงภาพขั้นสูงเพื่อ OCR แม่นยำ"""
     w, h = pil_img.size
     if w > 2000:
         ratio = 2000 / w
         pil_img = pil_img.resize((2000, int(h * ratio)), Image.Resampling.LANCZOS)
 
-    # CLAHE
     img_array = np.array(pil_img)
     if len(img_array.shape) == 3:
         lab = cv2.cvtColor(img_array, cv2.COLOR_RGB2LAB)
@@ -34,12 +59,10 @@ def preprocess_for_ocr(pil_img):
         img_array = cv2.cvtColor(merged, cv2.COLOR_LAB2RGB)
         pil_img = Image.fromarray(img_array)
 
-    # Enhance
     pil_img = ImageEnhance.Contrast(pil_img).enhance(2.5)
     pil_img = ImageEnhance.Sharpness(pil_img).enhance(2.5)
     pil_img = ImageEnhance.Brightness(pil_img).enhance(1.3)
 
-    # Threshold + Denoise + Deskew
     img = np.array(pil_img.convert("L"))
     blurred = cv2.GaussianBlur(img, (5, 5), 0)
     thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 51, 20)
@@ -47,7 +70,6 @@ def preprocess_for_ocr(pil_img):
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
     thresh = cv2.medianBlur(thresh, 3)
 
-    # Deskew
     coords = np.column_stack(np.where(thresh > 0))
     angle = cv2.minAreaRect(coords)[-1]
     if angle < -45:
@@ -63,7 +85,6 @@ def preprocess_for_ocr(pil_img):
     return thresh
 
 def ocr_image(img_array):
-    """OCR ด้วย Tesseract"""
     try:
         text = pytesseract.image_to_string(img_array, lang="tha+eng", config="--psm 6 --oem 3")
         return text
@@ -82,13 +103,12 @@ def clean_amount(val):
         return ""
 
 def extract_fields(text):
-    """Extraction ขั้นสูง (tuned สำหรับ HomePro format)"""
     data = {"date": "", "invoice_number": "", "amount": ""}
 
-    # Date: จาก header "วันที่ dd/mm/yy"
+    # Date
     date_patterns = [
-        r"วันที่\s*(\d{1,2}/\d{1,2}/\d{2,4})",
-        r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})"
+        r"(\d{1,2}/\d{1,2}/\d{2,4})",
+        r"วันที่\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})"
     ]
     for p in date_patterns:
         m = re.search(p, text, re.IGNORECASE)
@@ -96,7 +116,7 @@ def extract_fields(text):
             data["date"] = m.group(1)
             break
 
-    # Invoice: HH\d{6}
+    # Invoice
     inv_patterns = [
         r"(HH\d{6,8})",
         r"เลขที่\s*(HH\d{6,8})"
@@ -107,7 +127,7 @@ def extract_fields(text):
             data["invoice_number"] = m.group(1)
             break
 
-    # Amount before VAT: สรุปรวม or มูลค่าสินค้า ก่อนภาษี
+    # Amount before VAT
     amt_patterns = [
         r"สรุปรวม\s*([0-9,]+\.\d{2})",
         r"มูลค่าสินค้า\s*([0-9,]+\.\d{2})",
@@ -119,7 +139,6 @@ def extract_fields(text):
             data["amount"] = clean_amount(m.group(1))
             if data["amount"]:
                 break
-    # Fallback: Largest number before VAT line
     if not data["amount"]:
         vat_pos = text.find('ภาษีมูลค่าเพิ่ม')
         if vat_pos > 0:
@@ -146,19 +165,18 @@ def pil_to_base64(img):
     img.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode()
 
+# Test with Text Input (สำหรับ debug ด้วย text ที่ paste)
+test_text = st.text_area("Paste OCR Text สำหรับ Test (optional)", height=200)
+if test_text:
+    with st.spinner("Extract จาก text..."):
+        data = extract_fields(test_text)
+        st.json(data)
+
 # ================================
 # Streamlit App
 # ================================
 st.set_page_config(page_title="High-Accuracy OCR Invoice Tool", layout="wide")
-st.title("📄 OCR Invoice Extractor with ETA")
-st.write("อัปโหลด PDF → OCR + Extraction → แก้ไข → ดาวน์โหลด Excel (ทดสอบกับ 19 หน้าแล้ว, แม่นยำ 98%+)")
-
-# CSS
-st.markdown("""
-    <style>
-    .center-img { display: block; margin-left: auto; margin-right: auto; width: 30%; max-width: 400px; }
-    </style>
-""", unsafe_allow_html=True)
+st.title("📄 OCR Invoice Extractor with ETA (Fixed Tesseract)")
 
 uploaded_file = st.file_uploader("อัปโหลด PDF หรือ รูปภาพ", type=["pdf", "png", "jpg", "jpeg"])
 
